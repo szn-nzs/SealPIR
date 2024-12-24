@@ -1,6 +1,6 @@
 #include "pir_server.hpp"
+#include "bloom_filter.hpp"
 #include "pir_client.hpp"
-#include "utils/bloom_filter/bloom.h"
 #include <cassert>
 #include <cstdint>
 #include <cstdio>
@@ -76,8 +76,19 @@ void PIRServer::set_database(const std::unique_ptr<const uint8_t[]> &bytes,
 
   uint32_t offset = 0;
 
-  struct bloom *bloom_filter;
-  assert(bloom_init2(bloom_filter, num_of_plaintexts, 0.0001) == 0);
+  // struct bloom *bloom_filter;
+  // assert(bloom_init2(bloom_filter, num_of_plaintexts, 0.0001) == 0);
+  bloom_parameters bf_params;
+  bf_params.projected_element_count = num_of_plaintexts;
+  bf_params.false_positive_probability = 0.0001;
+  bf_params.random_seed = 0xA5A5A5A5;
+  if (!bf_params) {
+    printf("invalid set of bloom filter parameters\n");
+  }
+  bf_params.compute_optimal_parameters();
+
+  bloom_filter bf(bf_params);
+
   uint64_t n = 0;
 
   for (uint64_t i = 0; i < num_of_plaintexts; i++) {
@@ -120,16 +131,14 @@ void PIRServer::set_database(const std::unique_ptr<const uint8_t[]> &bytes,
       coefficients.push_back(1);
     }
 
-    // printf("i: %lu\n", i);
-    assert(bloom_add(bloom_filter, &i, sizeof(uint64_t)) == 0);
-    assert(bloom_check(bloom_filter, &i, sizeof(uint64_t)) == 1);
+    bf.insert(i);
+    assert(bf.contains(i));
 
     Plaintext plain;
     encoder_->encode(coefficients, plain);
     // cout << i << "-th encoded plaintext = " << plain.to_string() << endl;
     result->push_back(move(plain));
   }
-  bloom_free(bloom_filter);
 
   // Add padding to make database a matrix
   uint64_t current_plaintexts = result->size();

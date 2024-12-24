@@ -151,16 +151,10 @@ int main(int argc, char *argv[]) {
   cout << "Main: reply decoded" << endl;
 
   assert(elems.size() == size_per_item);
-  //   printf("111\n");
-  //   printf("elems.size: %lu\n", elems.size());
-  //   printf("ele_index: %lu\n", ele_index);
-  //   //   uint8_t xx = db_copy.get()[(ele_index * size_per_item)];
-  //   printf("111\n");
 
   bool failed = false;
   // Check that we retrieved the correct element
   for (uint32_t i = 0; i < size_per_item; i++) {
-    printf("i: %u\n", i);
     if (elems[i] != db_copy.get()[(ele_index * size_per_item) + i]) {
       cout << "Main: elems " << (int)elems[i] << ", db "
            << (int)db_copy.get()[(ele_index * size_per_item) + i] << endl;
