@@ -1,5 +1,9 @@
 #include "pir_server.hpp"
 #include "pir_client.hpp"
+#include "utils/bloom_filter/bloom.h"
+#include <cassert>
+#include <cstdint>
+#include <cstdio>
 
 using namespace std;
 using namespace seal;
@@ -72,7 +76,16 @@ void PIRServer::set_database(const std::unique_ptr<const uint8_t[]> &bytes,
 
   uint32_t offset = 0;
 
+  struct bloom *bloom_filter;
+  assert(bloom_init2(bloom_filter, num_of_plaintexts, 0.0001) == 0);
+  uint64_t n = 0;
+
   for (uint64_t i = 0; i < num_of_plaintexts; i++) {
+    // n = i;
+    // printf("i: %lu\n", i);
+    // assert(bloom_add(bloom_filter, &n, sizeof(uint64_t)) == 0);
+    // bloom_print(bloom_filter);
+    // assert(bloom_check(bloom_filter, &n, sizeof(uint64_t)) == 1);
 
     uint64_t process_bytes = 0;
 
@@ -107,11 +120,16 @@ void PIRServer::set_database(const std::unique_ptr<const uint8_t[]> &bytes,
       coefficients.push_back(1);
     }
 
+    // printf("i: %lu\n", i);
+    assert(bloom_add(bloom_filter, &i, sizeof(uint64_t)) == 0);
+    assert(bloom_check(bloom_filter, &i, sizeof(uint64_t)) == 1);
+
     Plaintext plain;
     encoder_->encode(coefficients, plain);
     // cout << i << "-th encoded plaintext = " << plain.to_string() << endl;
     result->push_back(move(plain));
   }
+  bloom_free(bloom_filter);
 
   // Add padding to make database a matrix
   uint64_t current_plaintexts = result->size();

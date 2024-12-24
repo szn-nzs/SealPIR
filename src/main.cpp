@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <memory>
 #include <random>
 #include <seal/seal.h>
@@ -14,7 +15,7 @@ using namespace seal;
 
 int main(int argc, char *argv[]) {
 
-  uint64_t number_of_items = 1 << 16;
+  uint64_t number_of_items = 1 << 14;
   uint64_t size_per_item = 1024; // in bytes
   uint32_t N = 4096;
 
@@ -74,7 +75,7 @@ int main(int argc, char *argv[]) {
   auto db_copy(make_unique<uint8_t[]>(number_of_items * size_per_item));
 
   seal::Blake2xbPRNGFactory factory;
-  auto gen =  factory.create();
+  auto gen = factory.create();
   for (uint64_t i = 0; i < number_of_items; i++) {
     for (uint64_t j = 0; j < size_per_item; j++) {
       uint8_t val = gen->generate() % 256;
@@ -150,10 +151,16 @@ int main(int argc, char *argv[]) {
   cout << "Main: reply decoded" << endl;
 
   assert(elems.size() == size_per_item);
+  //   printf("111\n");
+  //   printf("elems.size: %lu\n", elems.size());
+  //   printf("ele_index: %lu\n", ele_index);
+  //   //   uint8_t xx = db_copy.get()[(ele_index * size_per_item)];
+  //   printf("111\n");
 
   bool failed = false;
   // Check that we retrieved the correct element
   for (uint32_t i = 0; i < size_per_item; i++) {
+    printf("i: %u\n", i);
     if (elems[i] != db_copy.get()[(ele_index * size_per_item) + i]) {
       cout << "Main: elems " << (int)elems[i] << ", db "
            << (int)db_copy.get()[(ele_index * size_per_item) + i] << endl;
