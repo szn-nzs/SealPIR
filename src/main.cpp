@@ -94,15 +94,12 @@ int main(int argc, char *argv[]) {
     return -1;
   }
 
-  printf("111\n");
   if (!long_fuse_populate(kvMap, 10, valueLength,
                           enc_params.plain_modulus().value(), &lff)) {
     printf("populate wrong\n");
     return -1;
-  } else {
-    printf("333\n");
   }
-  printf("111\n");
+
   for (uint64_t i = 0; i < 10; ++i) {
     vector<uint64_t> tmp = long_fuse_decode(kvMap[i].first, &lff);
     for (uint64_t j = 0; j < valueLength; ++j) {
