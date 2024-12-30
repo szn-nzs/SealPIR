@@ -1,9 +1,11 @@
 #pragma once
 
+#include "bloom_filter.hpp"
 #include "seal/seal.h"
 #include "seal/util/polyarithsmallmod.h"
 #include <cassert>
 #include <cmath>
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -16,6 +18,7 @@ struct PirParams {
   bool enable_batching;
   bool enable_mswitching;
   std::uint64_t ele_num;
+  std::uint64_t key_size;
   std::uint64_t ele_size;
   std::uint64_t elements_per_plaintext;
   std::uint64_t num_of_plaintexts; // number of plaintexts in database
@@ -23,14 +26,15 @@ struct PirParams {
   std::uint32_t expansion_ratio;   // ratio of ciphertext to plaintext
   std::vector<std::uint64_t> nvec; // size of each of the d dimensions
   std::uint32_t slot_count;
+  bloom_parameters bf_params;
 };
 
 void gen_encryption_params(std::uint32_t N,    // degree of polynomial
                            std::uint32_t logt, // bits of plaintext coefficient
                            seal::EncryptionParameters &enc_params);
 
-void gen_pir_params(uint64_t ele_num, uint64_t ele_size, uint32_t d,
-                    const seal::EncryptionParameters &enc_params,
+void gen_pir_params(uint64_t ele_num, uint64_t ele_size, uint64_t key_size,
+                    uint32_t d, const seal::EncryptionParameters &enc_params,
                     PirParams &pir_params, bool enable_symmetric = false,
                     bool enable_batching = true, bool enable_mswitching = true);
 
@@ -42,6 +46,9 @@ void verify_encryption_params(const seal::EncryptionParameters &enc_params);
 
 void print_pir_params(const PirParams &pir_params);
 void print_seal_params(const seal::EncryptionParameters &enc_params);
+
+std::vector<std::uint64_t> get_dimensions(std::uint64_t num_of_plaintexts,
+                                          std::uint32_t d);
 
 // returns the number of plaintexts that the database can hold
 std::uint64_t plaintexts_per_db(std::uint32_t logt, std::uint64_t N,

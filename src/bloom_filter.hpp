@@ -21,10 +21,13 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include <cstdlib>
 #include <iterator>
 #include <limits>
 #include <string>
+#include <sys/types.h>
+#include <utility>
 #include <vector>
 
 static const std::size_t bits_per_char = 0x08; // 8 bits in 1 char(unsigned)
@@ -147,6 +150,27 @@ public:
 
     return true;
   }
+
+  // template <typename T>
+  // std::vector<std::pair<uint64_t, uint64_t>> get_indices(const T &t) {
+  //   return get_indices(reinterpret_cast<const unsigned char *>(&t),
+  //   sizeof(T));
+  // }
+  // std::vector<std::pair<uint64_t, uint64_t>>
+  // get_indices(const unsigned char *key_begin, const std::size_t &length) {
+  //   unsigned int num_of_hashes = optimal_parameters.number_of_hashes;
+  //   std::vector<std::pair<uint64_t, uint64_t>> res;
+  //   res.reserve(num_of_hashes);
+  //   std::size_t bit_index = 0;
+  //   std::size_t bit = 0;
+
+  //   for (std::size_t i = 0; i < num_of_hashes; ++i) {
+  //     compute_indices(hash_ap(key_begin, length, salt_[i]), bit_index, bit);
+
+  //     res.push_back(std::make_pair(bit_index, bit));
+  //   }
+  //   return res;
+  // }
 };
 
 class bloom_filter {
@@ -216,6 +240,35 @@ public:
   virtual ~bloom_filter() {}
 
   inline bool operator!() const { return (0 == table_size_); }
+
+  template <typename T>
+  std::vector<std::pair<uint64_t, uint64_t>> get_indices(const T &t) {
+    return get_indices(reinterpret_cast<const unsigned char *>(&t), sizeof(T));
+  }
+  std::vector<std::pair<uint64_t, uint64_t>>
+  get_indices(const unsigned char *key_begin, const std::size_t &length) {
+    std::vector<std::pair<uint64_t, uint64_t>> res;
+    res.reserve(salt_.size());
+    std::size_t bit_index = 0;
+    std::size_t bit = 0;
+
+    for (std::size_t i = 0; i < salt_.size(); ++i) {
+      compute_indices(hash_ap(key_begin, length, salt_[i]), bit_index, bit);
+
+      res.push_back(std::make_pair(bit_index, bit));
+    }
+    return res;
+  }
+
+  uint8_t get_bit_at(uint64_t i) {
+    std::size_t bit_index = 0;
+    std::size_t bit = 0;
+    compute_indices(i, bit_index, bit);
+    return get_bit_at(bit_index, bit);
+  }
+  uint8_t get_bit_at(uint64_t bit_index, uint64_t bit) {
+    return (bit_table_[bit_index / bits_per_char] & bit_mask[bit]) >> bit;
+  }
 
   inline void clear() {
     std::fill(bit_table_.begin(), bit_table_.end(),

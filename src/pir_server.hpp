@@ -2,20 +2,26 @@
 
 #include "pir.hpp"
 #include "pir_client.hpp"
+#include <cstdint>
 #include <map>
 #include <memory>
+#include <utility>
 #include <vector>
 
 class PIRServer {
 public:
+  using DBType =
+      std::vector<std::pair<std::vector<uint8_t>, std::vector<uint8_t>>>;
   PIRServer(const seal::EncryptionParameters &enc_params,
             const PirParams &pir_params);
 
   // NOTE: server takes over ownership of db and frees it when it exits.
   // Caller cannot free db
+  void set_database(const DBType &db, std::uint64_t ele_num,
+                    std::uint64_t ele_size);
   void set_database(std::unique_ptr<std::vector<seal::Plaintext>> &&db);
-  void set_database(const std::unique_ptr<const std::uint8_t[]> &bytes,
-                    std::uint64_t ele_num, std::uint64_t ele_size);
+  // void set_database(const std::unique_ptr<const std::uint8_t[]> &bytes,
+  //                   std::uint64_t ele_num, std::uint64_t ele_size);
   void preprocess_database();
 
   std::vector<seal::Ciphertext> expand_query(const seal::Ciphertext &encrypted,
@@ -44,7 +50,7 @@ private:
   bool is_db_preprocessed_;
   std::map<int, seal::GaloisKeys> galoisKeys_;
   std::unique_ptr<seal::Evaluator> evaluator_;
-  std::unique_ptr<seal::BatchEncoder> encoder_;
+  // std::unique_ptr<seal::BatchEncoder> encoder_;
   std::shared_ptr<seal::SEALContext> context_;
 
   // This is only used for simple_query

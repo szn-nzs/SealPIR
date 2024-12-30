@@ -11,7 +11,8 @@ public:
   PIRClient(const seal::EncryptionParameters &encparms,
             const PirParams &pirparams);
 
-  PirQuery generate_query(std::uint64_t desiredIndex);
+  // PirQuery generate_query(std::uint64_t desiredIndex);
+  PirQuery generate_query(std::vector<std::uint8_t> desiredKey);
   // Serializes the query into the provided stream and returns number of bytes
   // written
   int generate_serialized_query(std::uint64_t desiredIndex,
@@ -21,9 +22,9 @@ public:
   std::vector<uint64_t> extract_coeffs(seal::Plaintext pt);
   std::vector<uint64_t> extract_coeffs(seal::Plaintext pt,
                                        std::uint64_t offset);
-  std::vector<uint8_t> extract_bytes(seal::Plaintext pt, std::uint64_t offset);
+  uint64_t extract_bytes(seal::Plaintext pt);
 
-  std::vector<uint8_t> decode_reply(PirReply &reply, uint64_t offset);
+  uint64_t decode_reply(PirReply &reply, uint64_t offset);
 
   seal::Plaintext decrypt(seal::Ciphertext ct);
 
@@ -48,10 +49,10 @@ private:
   std::unique_ptr<seal::Decryptor> decryptor_;
   std::unique_ptr<seal::Evaluator> evaluator_;
   std::unique_ptr<seal::KeyGenerator> keygen_;
-  std::unique_ptr<seal::BatchEncoder> encoder_;
+  // std::unique_ptr<seal::BatchEncoder> encoder_;
   std::shared_ptr<seal::SEALContext> context_;
 
-  vector<uint64_t> indices_; // the indices for retrieval.
+  vector<vector<uint64_t>> indices_; // the indices for retrieval.
   vector<uint64_t> inverse_scales_;
 
   friend class PIRServer;

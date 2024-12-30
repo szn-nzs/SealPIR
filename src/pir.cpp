@@ -1,4 +1,6 @@
 #include "pir.hpp"
+#include "bloom_filter.hpp"
+#include <cstdint>
 
 using namespace std;
 using namespace seal;
@@ -35,7 +37,8 @@ void gen_encryption_params(std::uint32_t N, std::uint32_t logt,
 
   enc_params.set_poly_modulus_degree(N);
   enc_params.set_coeff_modulus(CoeffModulus::BFVDefault(N));
-  enc_params.set_plain_modulus(PlainModulus::Batching(N, logt + 1));
+  enc_params.set_plain_modulus((1UL << logt) + 1);
+  // enc_params.set_plain_modulus(PlainModulus::Batching(N, logt + 1));
   // the +1 above ensures we get logt bits for each plaintext coefficient.
   // Otherwise the coefficient modulus t will be logt bits, but only floor(t) =
   // logt-1 (whp) will be usable (since we need to ensure that all data in the
@@ -50,9 +53,9 @@ void verify_encryption_params(const seal::EncryptionParameters &enc_params) {
   if (!context.using_keyswitching()) {
     throw invalid_argument("SEAL parameters do not support key switching.");
   }
-  if (!context.first_context_data()->qualifiers().using_batching) {
-    throw invalid_argument("SEAL parameters do not support batching.");
-  }
+  // if (!context.first_context_data()->qualifiers().using_batching) {
+  //   throw invalid_argument("SEAL parameters do not support batching.");
+  // }
 
   BatchEncoder batch_encoder(context);
   size_t slot_count = batch_encoder.slot_count();
@@ -64,25 +67,23 @@ void verify_encryption_params(const seal::EncryptionParameters &enc_params) {
   return;
 }
 
-void gen_pir_params(uint64_t ele_num, uint64_t ele_size, uint32_t d,
-                    const EncryptionParameters &enc_params,
+void gen_pir_params(uint64_t ele_num, uint64_t ele_size, uint64_t key_size,
+                    uint32_t d, const EncryptionParameters &enc_params,
                     PirParams &pir_params, bool enable_symmetric,
                     bool enable_batching, bool enable_mswitching) {
   std::uint32_t N = enc_params.poly_modulus_degree();
   Modulus t = enc_params.plain_modulus();
   std::uint32_t logt = floor(log2(t.value())); // # of usable bits
-  std::uint64_t elements_per_plaintext;
-  std::uint64_t num_of_plaintexts;
+  // std::uint64_t elements_per_plaintext;
+  // std::uint64_t num_of_plaintexts;
 
-  if (enable_batching) {
-    elements_per_plaintext = elements_per_ptxt(logt, N, ele_size);
-    num_of_plaintexts = plaintexts_per_db(logt, N, ele_num, ele_size);
-  } else {
-    elements_per_plaintext = 1;
-    num_of_plaintexts = ele_num;
-  }
-
-  vector<uint64_t> nvec = get_dimensions(num_of_plaintexts, d);
+  // if (enable_batching) {
+  //   elements_per_plaintext = elements_per_ptxt(logt, N, ele_size);
+  //   num_of_plaintexts = plaintexts_per_db(logt, N, ele_num, ele_size);
+  // } else {
+  //   elements_per_plaintext = 1;
+  //   num_of_plaintexts = ele_num;
+  // }
 
   uint32_t expansion_ratio = 0;
   for (uint32_t i = 0; i < enc_params.coeff_modulus().size(); ++i) {
@@ -90,12 +91,26 @@ void gen_pir_params(uint64_t ele_num, uint64_t ele_size, uint32_t d,
     expansion_ratio += ceil(logqi / logt);
   }
 
+  pir_params.bf_params.projected_element_count = ele_num;
+  pir_params.bf_params.false_positive_probability = 0.01;
+  pir_params.bf_params.random_seed = 0xA5A5A5A5;
+  if (!pir_params.bf_params) {
+    printf("invalid set of bloom filter parameters\n");
+  }
+  pir_params.bf_params.compute_optimal_parameters();
+
+  uint64_t num_of_plaintexts =
+      pir_params.bf_params.optimal_parameters.table_size;
+  vector<uint64_t> nvec = get_dimensions(num_of_plaintexts, d);
+
   pir_params.enable_symmetric = enable_symmetric;
   pir_params.enable_batching = enable_batching;
   pir_params.enable_mswitching = enable_mswitching;
   pir_params.ele_num = ele_num;
   pir_params.ele_size = ele_size;
-  pir_params.elements_per_plaintext = elements_per_plaintext;
+  pir_params.key_size = key_size;
+  pir_params.elements_per_plaintext = 1;
+  // pir_params.elements_per_plaintext = elements_per_plaintext;
   pir_params.num_of_plaintexts = num_of_plaintexts;
   pir_params.d = d;
   pir_params.expansion_ratio = expansion_ratio << 1;
@@ -104,9 +119,9 @@ void gen_pir_params(uint64_t ele_num, uint64_t ele_size, uint32_t d,
 }
 
 void print_pir_params(const PirParams &pir_params) {
-  std::uint32_t prod =
-      accumulate(pir_params.nvec.begin(), pir_params.nvec.end(), 1,
-                 multiplies<uint64_t>());
+  // std::uint32_t prod =
+  //     accumulate(pir_params.nvec.begin(), pir_params.nvec.end(), 1,
+  //                multiplies<uint64_t>());
 
   cout << "PIR Parameters" << endl;
   cout << "number of elements: " << pir_params.ele_num << endl;
@@ -115,11 +130,11 @@ void print_pir_params(const PirParams &pir_params) {
        << endl;
   cout << "dimensions for d-dimensional hyperrectangle: " << pir_params.d
        << endl;
-  cout << "number of BFV plaintexts (before padding): "
-       << pir_params.num_of_plaintexts << endl;
-  cout << "Number of BFV plaintexts after padding (to fill d-dimensional "
-          "hyperrectangle): "
-       << prod << endl;
+  // cout << "number of BFV plaintexts (before padding): "
+  //      << pir_params.num_of_plaintexts << endl;
+  // cout << "Number of BFV plaintexts after padding (to fill d-dimensional "
+  //         "hyperrectangle): "
+  //      << prod << endl;
   cout << "expansion ratio: " << pir_params.expansion_ratio << endl;
   cout << "Using symmetric encryption: " << pir_params.enable_symmetric << endl;
   cout << "Using recursive mod switching: " << pir_params.enable_mswitching

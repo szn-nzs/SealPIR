@@ -1,4 +1,8 @@
 #include "pir_client.hpp"
+#include <cassert>
+#include <cstdint>
+#include <cstdio>
+#include <vector>
 
 using namespace std;
 using namespace seal;
@@ -24,81 +28,114 @@ PIRClient::PIRClient(const EncryptionParameters &enc_params,
 
   decryptor_ = make_unique<Decryptor>(*context_, secret_key);
   evaluator_ = make_unique<Evaluator>(*context_);
-  encoder_ = make_unique<BatchEncoder>(*context_);
+  // encoder_ = make_unique<mEncoder>(*context_);
+
+  indices_.resize(pir_params_.bf_params.optimal_parameters.number_of_hashes);
 }
 
-int PIRClient::generate_serialized_query(uint64_t desiredIndex,
-                                         std::stringstream &stream) {
+// int PIRClient::generate_serialized_query(uint64_t desiredIndex,
+//                                          std::stringstream &stream) {
 
-  int N = enc_params_.poly_modulus_degree();
-  int output_size = 0;
-  indices_ = compute_indices(desiredIndex, pir_params_.nvec);
-  Plaintext pt(enc_params_.poly_modulus_degree());
+//   int N = enc_params_.poly_modulus_degree();
+//   int output_size = 0;
+//   indices_ = compute_indices(desiredIndex, pir_params_.nvec);
+//   Plaintext pt(enc_params_.poly_modulus_degree());
 
-  for (uint32_t i = 0; i < indices_.size(); i++) {
-    uint32_t num_ptxts = ceil((pir_params_.nvec[i] + 0.0) / N);
-    // initialize result.
-    cout << "Client: index " << i + 1 << "/ " << indices_.size() << " = "
-         << indices_[i] << endl;
-    cout << "Client: number of ctxts needed for query = " << num_ptxts << endl;
+//   for (uint32_t i = 0; i < indices_.size(); i++) {
+//     uint32_t num_ptxts = ceil((pir_params_.nvec[i] + 0.0) / N);
+//     // initialize result.
+//     cout << "Client: index " << i + 1 << "/ " << indices_.size() << " = "
+//          << indices_[i] << endl;
+//     cout << "Client: number of ctxts needed for query = " << num_ptxts <<
+//     endl;
 
-    for (uint32_t j = 0; j < num_ptxts; j++) {
-      pt.set_zero();
-      if (indices_[i] >= N * j && indices_[i] <= N * (j + 1)) {
-        uint64_t real_index = indices_[i] - N * j;
-        uint64_t n_i = pir_params_.nvec[i];
-        uint64_t total = N;
-        if (j == num_ptxts - 1) {
-          total = n_i % N;
-        }
-        uint64_t log_total = ceil(log2(total));
+//     for (uint32_t j = 0; j < num_ptxts; j++) {
+//       pt.set_zero();
+//       if (indices_[i] >= N * j && indices_[i] <= N * (j + 1)) {
+//         uint64_t real_index = indices_[i] - N * j;
+//         uint64_t n_i = pir_params_.nvec[i];
+//         uint64_t total = N;
+//         if (j == num_ptxts - 1) {
+//           total = n_i % N;
+//         }
+//         uint64_t log_total = ceil(log2(total));
 
-        cout << "Client: Inverting " << pow(2, log_total) << endl;
-        pt[real_index] =
-            invert_mod(pow(2, log_total), enc_params_.plain_modulus());
-      }
+//         cout << "Client: Inverting " << pow(2, log_total) << endl;
+//         pt[real_index] =
+//             invert_mod(pow(2, log_total), enc_params_.plain_modulus());
+//       }
 
-      if (pir_params_.enable_symmetric) {
-        output_size += encryptor_->encrypt_symmetric(pt).save(stream);
-      } else {
-        output_size += encryptor_->encrypt(pt).save(stream);
-      }
-    }
+//       if (pir_params_.enable_symmetric) {
+//         output_size += encryptor_->encrypt_symmetric(pt).save(stream);
+//       } else {
+//         output_size += encryptor_->encrypt(pt).save(stream);
+//       }
+//     }
+//   }
+
+//   return output_size;
+// }
+
+// PirQuery PIRClient::generate_query(uint64_t desiredIndex) {
+
+PirQuery PIRClient::generate_query(vector<uint8_t> desiredKey) {
+  bloom_parameters bf_params = pir_params_.bf_params;
+  bloom_filter bf(bf_params);
+  // bfIndices.first就是对应明文的序号
+  vector<pair<uint64_t, uint64_t>> bfIndices =
+      bf.get_indices(desiredKey.data(), pir_params_.key_size);
+
+  assert(bfIndices.size() == indices_.size());
+  for (size_t i = 0; i < bf_params.optimal_parameters.number_of_hashes; ++i) {
+    printf("indice: %lu\n", bfIndices[i].first);
+    uint64_t desiredIndex = get_fv_index(bfIndices[i].first);
+    assert(desiredIndex == bfIndices[i].first);
+    indices_[i] = compute_indices(desiredIndex, pir_params_.nvec);
+    printf("nvec.size: %lu\n", pir_params_.nvec.size());
+    printf("indices.size: %lu\n", indices_.size());
+    assert(indices_[i].size() == 1);
+    assert(desiredIndex == indices_[i][0]);
   }
-
-  return output_size;
-}
-
-PirQuery PIRClient::generate_query(uint64_t desiredIndex) {
-
-  indices_ = compute_indices(desiredIndex, pir_params_.nvec);
 
   PirQuery result(pir_params_.d);
   int N = enc_params_.poly_modulus_degree();
 
-  Plaintext pt(enc_params_.poly_modulus_degree());
-  for (uint32_t i = 0; i < indices_.size(); i++) {
-    uint32_t num_ptxts = ceil((pir_params_.nvec[i] + 0.0) / N);
-    // initialize result.
-    cout << "Client: index " << i + 1 << "/ " << indices_.size() << " = "
-         << indices_[i] << endl;
-    cout << "Client: number of ctxts needed for query = " << num_ptxts << endl;
+  // 处理每个维度
+  for (uint32_t i = 0; i < pir_params_.d; i++) {
+    Plaintext pt(enc_params_.poly_modulus_degree());
 
+    // 如果当前维度的明文数大于N，也就是一个明文放不下当前维度的query
+    // 需要num_ptxts个明文
+    uint64_t n_i = pir_params_.nvec[i];
+    uint32_t num_ptxts = ceil((n_i + 0.0) / N);
+    // for (uint32_t hash_idx = 0; hash_idx < indices_.size(); ++hash_idx) {
+
+    // initialize result.
+    // cout << "Client: index " << i + 1 << "/ " << indices_[hash_idx].size()
+    //      << " = " << indices_[hash_idx][i] << endl;
+    // cout << "Client: number of ctxts needed for query = " << num_ptxts <<
+    // endl;
     for (uint32_t j = 0; j < num_ptxts; j++) {
       pt.set_zero();
-      if (indices_[i] >= N * j && indices_[i] <= N * (j + 1)) {
-        uint64_t real_index = indices_[i] - N * j;
-        uint64_t n_i = pir_params_.nvec[i];
-        uint64_t total = N;
-        if (j == num_ptxts - 1) {
-          total = n_i % N;
-        }
-        uint64_t log_total = ceil(log2(total));
 
-        cout << "Client: Inverting " << pow(2, log_total) << endl;
-        pt[real_index] =
-            invert_mod(pow(2, log_total), enc_params_.plain_modulus());
+      uint64_t total = N;
+      if (j == num_ptxts - 1) {
+        total = n_i % N;
       }
+      uint64_t log_total = ceil(log2(total));
+
+      // 处理h_i(x)
+      for (uint32_t hash_idx = 0; hash_idx < indices_.size(); ++hash_idx) {
+        if (indices_[hash_idx][i] >= N * j &&
+            indices_[hash_idx][i] <= N * (j + 1)) {
+          uint64_t real_index = indices_[hash_idx][i] - N * j;
+
+          cout << "Client: Inverting " << pow(2, log_total) << endl;
+          pt[real_index] =
+              invert_mod(pow(2, log_total), enc_params_.plain_modulus());
+        }
+      }
+
       Ciphertext dest;
       if (pir_params_.enable_symmetric) {
         encryptor_->encrypt_symmetric(pt, dest);
@@ -127,49 +164,71 @@ Plaintext PIRClient::decrypt(Ciphertext ct) {
   return pt;
 }
 
-vector<uint8_t> PIRClient::decode_reply(PirReply &reply, uint64_t offset) {
+uint64_t PIRClient::decode_reply(PirReply &reply, uint64_t offset) {
   Plaintext result = decode_reply(reply);
-  return extract_bytes(result, offset);
+  return extract_bytes(result);
 }
 
-vector<uint64_t> PIRClient::extract_coeffs(Plaintext pt) {
-  vector<uint64_t> coeffs;
-  encoder_->decode(pt, coeffs);
-  return coeffs;
-}
+// vector<uint64_t> PIRClient::extract_coeffs(Plaintext pt) {
+//   vector<uint64_t> coeffs;
+//   encoder_->decode(pt, coeffs);
+//   return coeffs;
+// }
 
-std::vector<uint64_t> PIRClient::extract_coeffs(seal::Plaintext pt,
-                                                uint64_t offset) {
-  vector<uint64_t> coeffs;
-  encoder_->decode(pt, coeffs);
+// std::vector<uint64_t> PIRClient::extract_coeffs(seal::Plaintext pt,
+//                                                 uint64_t offset) {
+//   vector<uint64_t> coeffs;
+//   encoder_->decode(pt, coeffs);
 
-  uint32_t logt = floor(log2(enc_params_.plain_modulus().value()));
+//   uint32_t logt = floor(log2(enc_params_.plain_modulus().value()));
 
-  uint64_t coeffs_per_element =
-      coefficients_per_element(logt, pir_params_.ele_size);
+//   uint64_t coeffs_per_element =
+//       coefficients_per_element(logt, pir_params_.ele_size);
 
-  return std::vector<uint64_t>(coeffs.begin() + offset * coeffs_per_element,
-                               coeffs.begin() +
-                                   (offset + 1) * coeffs_per_element);
-}
+//   return std::vector<uint64_t>(coeffs.begin() + offset * coeffs_per_element,
+//                                coeffs.begin() +
+//                                    (offset + 1) * coeffs_per_element);
+// }
 
-std::vector<uint8_t> PIRClient::extract_bytes(seal::Plaintext pt,
-                                              uint64_t offset) {
+uint64_t PIRClient::extract_bytes(seal::Plaintext pt) {
   uint32_t N = enc_params_.poly_modulus_degree();
   uint32_t logt = floor(log2(enc_params_.plain_modulus().value()));
-  uint32_t bytes_per_ptxt =
-      pir_params_.elements_per_plaintext * pir_params_.ele_size;
+  uint32_t bytes_per_ptxt = 1;
 
   // Convert from FV plaintext (polynomial) to database element at the client
   vector<uint8_t> elems(bytes_per_ptxt);
   vector<uint64_t> coeffs;
-  encoder_->decode(pt, coeffs);
-  coeffs_to_bytes(logt, coeffs, elems.data(), bytes_per_ptxt,
-                  pir_params_.ele_size);
-  return std::vector<uint8_t>(elems.begin() + offset * pir_params_.ele_size,
-                              elems.begin() +
-                                  (offset + 1) * pir_params_.ele_size);
+  coeffs.resize(N);
+  for (uint64_t i = 0; i < N; ++i) {
+    coeffs[i] = pt[i];
+  }
+  // encoder_->decode(pt, coeffs);
+  printf("coeffs0: %lu\n", coeffs[0]);
+  return coeffs[0];
+  // coeffs_to_bytes(logt, coeffs, elems.data(), bytes_per_ptxt,
+  //                 pir_params_.ele_size);
+  // return std::vector<uint8_t>(elems.begin() + offset * pir_params_.ele_size,
+  //                             elems.begin() +
+  //                                 (offset + 1) * pir_params_.ele_size);
 }
+
+// std::vector<uint8_t> PIRClient::extract_bytes(seal::Plaintext pt,
+//                                               uint64_t offset) {
+//   uint32_t N = enc_params_.poly_modulus_degree();
+//   uint32_t logt = floor(log2(enc_params_.plain_modulus().value()));
+//   uint32_t bytes_per_ptxt =
+//       pir_params_.elements_per_plaintext * pir_params_.ele_size;
+
+//   // Convert from FV plaintext (polynomial) to database element at the client
+//   vector<uint8_t> elems(bytes_per_ptxt);
+//   vector<uint64_t> coeffs;
+//   encoder_->decode(pt, coeffs);
+//   coeffs_to_bytes(logt, coeffs, elems.data(), bytes_per_ptxt,
+//                   pir_params_.ele_size);
+//   return std::vector<uint8_t>(elems.begin() + offset * pir_params_.ele_size,
+//                               elems.begin() +
+//                                   (offset + 1) * pir_params_.ele_size);
+// }
 
 Plaintext PIRClient::decode_reply(PirReply &reply) {
   EncryptionParameters parms;
@@ -257,25 +316,27 @@ GaloisKeys PIRClient::generate_galois_keys() {
   return gal_keys;
 }
 
-Plaintext PIRClient::replace_element(Plaintext pt, vector<uint64_t> new_element,
-                                     uint64_t offset) {
-  vector<uint64_t> coeffs = extract_coeffs(pt);
+// Plaintext PIRClient::replace_element(Plaintext pt, vector<uint64_t>
+// new_element,
+//                                      uint64_t offset) {
+//   vector<uint64_t> coeffs = extract_coeffs(pt);
 
-  uint32_t logt = floor(log2(enc_params_.plain_modulus().value()));
-  uint64_t coeffs_per_element =
-      coefficients_per_element(logt, pir_params_.ele_size);
+//   uint32_t logt = floor(log2(enc_params_.plain_modulus().value()));
+//   uint64_t coeffs_per_element =
+//       coefficients_per_element(logt, pir_params_.ele_size);
 
-  assert(new_element.size() == coeffs_per_element);
+//   assert(new_element.size() == coeffs_per_element);
 
-  for (uint64_t i = 0; i < coeffs_per_element; i++) {
-    coeffs[i + offset * coeffs_per_element] = new_element[i];
-  }
+//   for (uint64_t i = 0; i < coeffs_per_element; i++) {
+//     coeffs[i + offset * coeffs_per_element] = new_element[i];
+//   }
 
-  Plaintext new_pt;
+//   Plaintext new_pt;
 
-  encoder_->encode(coeffs, new_pt);
-  return new_pt;
-}
+//   for (uint64_t i = 0; i < )
+//   encoder_->encode(coeffs, new_pt);
+//   return new_pt;
+// }
 
 Ciphertext PIRClient::get_one() {
   Plaintext pt("1");
