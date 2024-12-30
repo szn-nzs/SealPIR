@@ -60,10 +60,9 @@ static inline uint32_t long_fuse_reduce(uint32_t hash, uint32_t n) {
 static inline uint64_t long_fuse_fingerprint(uint64_t hash) {
   return hash ^ (hash >> 32);
 }
-static inline void long_fuse_addi(std::vector<uint64_t> &p,
-                                  const std::vector<uint64_t> &q,
+static inline void long_fuse_addi(uint64_t *p, const uint64_t *q,
                                   uint64_t valueLength, uint64_t valueModulus) {
-  assert(p.size() == valueLength && q.size() == valueLength);
+  // assert(p.size() == valueLength && q.size() == valueLength);
   for (uint64_t i = 0; i < valueLength; ++i) {
     int64_t tmp_p = (int64_t)p[i], tmp_q = (int64_t)q[i];
     tmp_p += tmp_q;
@@ -73,10 +72,9 @@ static inline void long_fuse_addi(std::vector<uint64_t> &p,
     // p[i] %= (int64_t)valueModulus;
   }
 }
-static inline void long_fuse_subi(std::vector<uint64_t> &p,
-                                  const std::vector<uint64_t> &q,
+static inline void long_fuse_subi(uint64_t *p, const uint64_t *q,
                                   uint64_t valueLength, uint64_t valueModulus) {
-  assert(p.size() == valueLength && q.size() == valueLength);
+  // assert(p.size() == valueLength && q.size() == valueLength);
   for (uint64_t i = 0; i < valueLength; ++i) {
     int64_t tmp_p = (int64_t)p[i], tmp_q = (int64_t)q[i];
     tmp_p -= tmp_q;
@@ -108,8 +106,7 @@ typedef struct long_fuse_s {
   uint32_t ArrayLength;
   uint64_t ValueLongLength;
   uint64_t ValueModulus;
-  std::vector<std::vector<uint64_t>> Fingerprints;
-  // int64_t **Fingerprints;
+  uint64_t **Fingerprints;
 } long_fuse_t;
 
 // #ifdefs adapted from:
@@ -214,15 +211,14 @@ static inline uint32_t long_fuse_hash(int index, uint64_t hash,
 static inline std::vector<uint64_t>
 long_fuse_decode(uint64_t key, const long_fuse_t *filter) {
   uint64_t hash = long_fuse_mix_split(key, filter->Seed);
-  //   uint8_t f = long_fuse_fingerprint(hash);
   long_hashes_t hashes = long_fuse_hash_batch(hash, filter);
   std::vector<uint64_t> res(filter->ValueLongLength, 0);
-  long_fuse_addi(res, filter->Fingerprints[hashes.h0], filter->ValueLongLength,
-                 filter->ValueModulus);
-  long_fuse_addi(res, filter->Fingerprints[hashes.h1], filter->ValueLongLength,
-                 filter->ValueModulus);
-  long_fuse_addi(res, filter->Fingerprints[hashes.h2], filter->ValueLongLength,
-                 filter->ValueModulus);
+  long_fuse_addi(res.data(), filter->Fingerprints[hashes.h0],
+                 filter->ValueLongLength, filter->ValueModulus);
+  long_fuse_addi(res.data(), filter->Fingerprints[hashes.h1],
+                 filter->ValueLongLength, filter->ValueModulus);
+  long_fuse_addi(res.data(), filter->Fingerprints[hashes.h2],
+                 filter->ValueLongLength, filter->ValueModulus);
   return res;
 }
 
@@ -295,33 +291,22 @@ static inline bool long_fuse_allocate(uint32_t size, uint64_t valueLongLength,
   filter->ValueLongLength = valueLongLength;
   filter->ValueModulus = valueModulus;
 
-  filter->Fingerprints.resize(filter->ArrayLength);
-  // filter->Fingerprints =
-  //     (int64_t **)malloc(filter->ArrayLength * sizeof(int64_t *));
+  filter->Fingerprints =
+      (uint64_t **)malloc(filter->ArrayLength * sizeof(uint64_t *));
   for (uint64_t i = 0; i < filter->ArrayLength; ++i) {
-    filter->Fingerprints[i].resize(filter->ValueLongLength);
-    // filter->Fingerprints[i] =
-    //     (int64_t *)calloc(filter->ValueLongLength, sizeof(int64_t));
-
-    // memset(filter->Fingerprints[i].data(), 1,
-    //        filter->ValueLongLength * sizeof(int64_t));
+    filter->Fingerprints[i] =
+        (uint64_t *)calloc(filter->ValueLongLength, sizeof(uint64_t));
   }
-  return true;
-  // return filter->Fingerprints != NULL;
+  return filter->Fingerprints != NULL;
 }
-
-// report memory usage
-// static inline size_t long_fuse_size_in_bytes(const long_fuse_t *filter) {
-//   return filter->ArrayLength * sizeof(uint64_t) + sizeof(long_fuse_t);
-// }
 
 // release memory
 static inline void long_fuse_free(long_fuse_t *filter) {
-  // for (uint64_t i = 0; i < filter->ValueLongLength; ++i) {
-  //   free(filter->Fingerprints[i]);
-  // }
-  // free(filter->Fingerprints);
-  // filter->Fingerprints = NULL;
+  for (uint64_t i = 0; i < filter->ValueLongLength; ++i) {
+    free(filter->Fingerprints[i]);
+  }
+  free(filter->Fingerprints);
+  filter->Fingerprints = NULL;
   filter->Seed = 0;
   filter->SegmentLength = 0;
   filter->SegmentLengthMask = 0;
@@ -393,8 +378,6 @@ static inline bool long_fuse_populate(
 
     uint64_t maskblock = block - 1;
     for (uint32_t i = 0; i < size; i++) {
-      // for (auto iter = keyValueMap.begin(); iter != keyValueMap.end();
-      // ++iter) {
       // ***********************************
       uint64_t hash = long_fuse_murmur64(keyValueMap[i].first + filter->Seed);
       hashValueMap[hash] = keyValueMap[i].second;
@@ -496,7 +479,6 @@ static inline bool long_fuse_populate(
       size = stacksize;
       break;
     }
-    // 为了踢掉重复的key吗？
     // else if (duplicates > 0) {
     //   size = long_fuse_sort_and_remove_dup(keys, size);
     // }
@@ -506,11 +488,9 @@ static inline bool long_fuse_populate(
     filter->Seed = long_fuse_rng_splitmix64(&rng_counter);
   }
 
-  assert(filter->Fingerprints.size() == filter->ArrayLength);
   for (uint64_t i = 0; i < filter->ArrayLength; ++i) {
-    assert(filter->Fingerprints[i].size() == filter->ValueLongLength);
-    std::fill(filter->Fingerprints[i].begin(), filter->Fingerprints[i].end(),
-              1);
+    memset(filter->Fingerprints[i], 1,
+           filter->ValueLongLength * sizeof(uint64_t));
   }
 
   // for (uint32_t i = size - 1; i < size; i--) {
@@ -526,10 +506,8 @@ static inline bool long_fuse_populate(
     h012[2] = long_fuse_hash(2, hash, filter);
     h012[3] = h012[0];
     h012[4] = h012[1];
-    // memset(filter->Fingerprints[h012[found]], 0,
-    //        filter->ValueLongLength * sizeof(uint64_t));
-    std::fill(filter->Fingerprints[h012[found]].begin(),
-              filter->Fingerprints[h012[found]].end(), 0);
+    memset(filter->Fingerprints[h012[found]], 0,
+           filter->ValueLongLength * sizeof(uint64_t));
     long_fuse_subi(filter->Fingerprints[h012[found]],
                    filter->Fingerprints[h012[found + 1]],
                    filter->ValueLongLength, filter->ValueModulus);
@@ -537,7 +515,7 @@ static inline bool long_fuse_populate(
                    filter->Fingerprints[h012[found + 2]],
                    filter->ValueLongLength, filter->ValueModulus);
 
-    long_fuse_addi(filter->Fingerprints[h012[found]], hashValueMap[hash],
+    long_fuse_addi(filter->Fingerprints[h012[found]], hashValueMap[hash].data(),
                    filter->ValueLongLength, filter->ValueModulus);
   }
 
