@@ -1,6 +1,8 @@
 #include "pir.hpp"
 #include "bloom_filter.hpp"
+#include "long_fuse_filter.hpp"
 #include <cstdint>
+#include <cstdio>
 
 using namespace std;
 using namespace seal;
@@ -91,6 +93,7 @@ void gen_pir_params(uint64_t ele_num, uint64_t ele_size, uint64_t key_size,
     expansion_ratio += ceil(logqi / logt);
   }
 
+  // generate bloom filter params
   pir_params.bf_params.projected_element_count = ele_num;
   pir_params.bf_params.false_positive_probability = 0.01;
   pir_params.bf_params.random_seed = 0xA5A5A5A5;
@@ -98,24 +101,35 @@ void gen_pir_params(uint64_t ele_num, uint64_t ele_size, uint64_t key_size,
     printf("invalid set of bloom filter parameters\n");
   }
   pir_params.bf_params.compute_optimal_parameters();
+  // generate fuse filter params
 
-  uint64_t num_of_plaintexts =
-      pir_params.bf_params.optimal_parameters.table_size;
-  vector<uint64_t> nvec = get_dimensions(num_of_plaintexts, d);
+  uint64_t lff_coeff_per_ptxt = coefficients_per_element(logt, ele_size);
+  assert(lff_coeff_per_ptxt <= N);
+  long_fuse_gen_params(ele_num, lff_coeff_per_ptxt, t.value(),
+                       pir_params.lff_params);
+
+  // uint64_t num_of_plaintexts =
+  //     pir_params.bf_params.optimal_parameters.table_size;
+  // vector<uint64_t> nvec_for_bf =
+  //     get_dimensions(pir_params.bf_params.optimal_parameters.table_size, d);
+  // vector<uint64_t> nvec_for_lff =
+  //     get_dimensions(pir_params.lff_params.ArrayLength, d);
 
   pir_params.enable_symmetric = enable_symmetric;
   pir_params.enable_batching = enable_batching;
   pir_params.enable_mswitching = enable_mswitching;
   pir_params.ele_num = ele_num;
   pir_params.ele_size = ele_size;
-  pir_params.key_size = key_size;
+  // pir_params.key_size = key_size;
   pir_params.elements_per_plaintext = 1;
   // pir_params.elements_per_plaintext = elements_per_plaintext;
-  pir_params.num_of_plaintexts = num_of_plaintexts;
+  // pir_params.num_of_plaintexts = num_of_plaintexts;
   pir_params.d = d;
   pir_params.expansion_ratio = expansion_ratio << 1;
-  pir_params.nvec = nvec;
-  pir_params.slot_count = N;
+  pir_params.bf_nvec =
+      get_dimensions(pir_params.bf_params.optimal_parameters.table_size, d);
+  pir_params.lff_nvec = get_dimensions(pir_params.lff_params.ArrayLength, d);
+  // pir_params.slot_count = N;
 }
 
 void print_pir_params(const PirParams &pir_params) {
@@ -139,7 +153,7 @@ void print_pir_params(const PirParams &pir_params) {
   cout << "Using symmetric encryption: " << pir_params.enable_symmetric << endl;
   cout << "Using recursive mod switching: " << pir_params.enable_mswitching
        << endl;
-  cout << "slot count: " << pir_params.slot_count << endl;
+  // cout << "slot count: " << pir_params.slot_count << endl;
   cout << "==============================" << endl;
 }
 
@@ -217,24 +231,31 @@ vector<uint64_t> bytes_to_coeffs(uint32_t limit, const uint8_t *bytes,
 
 void coeffs_to_bytes(uint32_t limit, const vector<uint64_t> &coeffs,
                      uint8_t *output, uint32_t size_out, uint32_t ele_size) {
+  // printf("111\n");
   uint32_t room = 8;
   uint32_t j = 0;
   uint8_t *target = output;
   uint32_t bits_left = ele_size * 8;
+  // printf("111\n");
   for (uint32_t i = 0; i < coeffs.size(); i++) {
     if (bits_left == 0) {
       bits_left = ele_size * 8;
     }
+    // printf("111\n");
     uint64_t src = coeffs[i];
     uint32_t rest = min(limit, bits_left);
+    // printf("111\n");
     while (rest && j < size_out) {
+      // printf("j = %u\n", j);
       uint32_t shift = rest;
       if (room < rest) {
         shift = room;
       }
+      // printf("222\n");
 
       target[j] = target[j] << shift;
       target[j] = target[j] | (src >> (limit - shift));
+      // printf("222\n");
       src = src << shift;
       room -= shift;
       rest -= shift;
@@ -243,6 +264,7 @@ void coeffs_to_bytes(uint32_t limit, const vector<uint64_t> &coeffs,
         j++;
         room = 8;
       }
+      // printf("222\n");
     }
   }
 }

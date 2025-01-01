@@ -1,4 +1,5 @@
 #include "pir_client.hpp"
+#include "long_fuse_filter.hpp"
 #include <cassert>
 #include <cstdint>
 #include <cstdio>
@@ -30,8 +31,10 @@ PIRClient::PIRClient(const EncryptionParameters &enc_params,
   evaluator_ = make_unique<Evaluator>(*context_);
   // encoder_ = make_unique<mEncoder>(*context_);
 
-  indices_.resize(pir_params_.bf_params.optimal_parameters.number_of_hashes);
+  // indices_.resize(pir_params_.bf_params.optimal_parameters.number_of_hashes);
 }
+
+void PIRClient::set_seed(uint64_t seed) { pir_params_.lff_params.Seed = seed; }
 
 // int PIRClient::generate_serialized_query(uint64_t desiredIndex,
 //                                          std::stringstream &stream) {
@@ -78,23 +81,20 @@ PIRClient::PIRClient(const EncryptionParameters &enc_params,
 
 // PirQuery PIRClient::generate_query(uint64_t desiredIndex) {
 
-PirQuery PIRClient::generate_query(vector<uint8_t> desiredKey) {
+PirQuery PIRClient::generate_bf_query(uint64_t desiredKey) {
   bloom_parameters bf_params = pir_params_.bf_params;
   bloom_filter bf(bf_params);
   // bfIndices.first就是对应明文的序号
-  vector<pair<uint64_t, uint64_t>> bfIndices =
-      bf.get_indices(desiredKey.data(), pir_params_.key_size);
+  vector<pair<uint64_t, uint64_t>> bfIndices = bf.get_indices(desiredKey);
 
-  assert(bfIndices.size() == indices_.size());
+  vector<vector<uint64_t>> indices;
+  indices.resize(bfIndices.size());
   for (size_t i = 0; i < bf_params.optimal_parameters.number_of_hashes; ++i) {
-    printf("indice: %lu\n", bfIndices[i].first);
     uint64_t desiredIndex = get_fv_index(bfIndices[i].first);
     assert(desiredIndex == bfIndices[i].first);
-    indices_[i] = compute_indices(desiredIndex, pir_params_.nvec);
-    printf("nvec.size: %lu\n", pir_params_.nvec.size());
-    printf("indices.size: %lu\n", indices_.size());
-    assert(indices_[i].size() == 1);
-    assert(desiredIndex == indices_[i][0]);
+    indices[i] = compute_indices(desiredIndex, pir_params_.bf_nvec);
+    assert(indices[i].size() == 1);
+    assert(desiredIndex == indices[i][0]);
   }
 
   PirQuery result(pir_params_.d);
@@ -106,9 +106,8 @@ PirQuery PIRClient::generate_query(vector<uint8_t> desiredKey) {
 
     // 如果当前维度的明文数大于N，也就是一个明文放不下当前维度的query
     // 需要num_ptxts个明文
-    uint64_t n_i = pir_params_.nvec[i];
+    uint64_t n_i = pir_params_.bf_nvec[i];
     uint32_t num_ptxts = ceil((n_i + 0.0) / N);
-    // for (uint32_t hash_idx = 0; hash_idx < indices_.size(); ++hash_idx) {
 
     // initialize result.
     // cout << "Client: index " << i + 1 << "/ " << indices_[hash_idx].size()
@@ -125,10 +124,77 @@ PirQuery PIRClient::generate_query(vector<uint8_t> desiredKey) {
       uint64_t log_total = ceil(log2(total));
 
       // 处理h_i(x)
-      for (uint32_t hash_idx = 0; hash_idx < indices_.size(); ++hash_idx) {
-        if (indices_[hash_idx][i] >= N * j &&
-            indices_[hash_idx][i] <= N * (j + 1)) {
-          uint64_t real_index = indices_[hash_idx][i] - N * j;
+      for (uint32_t hash_idx = 0; hash_idx < indices.size(); ++hash_idx) {
+        // *****************************************似乎是下面这两行报过数组越界？
+        if (indices[hash_idx][i] >= N * j &&
+            indices[hash_idx][i] <= N * (j + 1)) {
+          uint64_t real_index = indices[hash_idx][i] - N * j;
+
+          cout << "Client: Inverting " << pow(2, log_total) << endl;
+          pt[real_index] =
+              invert_mod(pow(2, log_total), enc_params_.plain_modulus());
+        }
+      }
+
+      Ciphertext dest;
+      if (pir_params_.enable_symmetric) {
+        encryptor_->encrypt_symmetric(pt, dest);
+      } else {
+        encryptor_->encrypt(pt, dest);
+      }
+      result[i].push_back(dest);
+    }
+  }
+
+  return result;
+}
+
+PirQuery PIRClient::generate_lff_query(uint64_t desiredKey) {
+  long_fuse_params params = pir_params_.lff_params;
+  uint64_t hash = long_fuse_mix_split(desiredKey, params.Seed);
+  long_hashes_t hashes = long_fuse_hash_batch(hash, params);
+  vector<uint64_t> lff_indices({hashes.h0, hashes.h1, hashes.h2});
+  // printf("h0: %u, h1: %u, h2: %u\n", hashes.h0, hashes.h1, hashes.h2);
+  assert(lff_indices.size() == lff_hash_num);
+
+  // 把三个哈希值分别分成d维
+  vector<vector<uint64_t>> indices;
+  indices.resize(lff_hash_num);
+  for (size_t i = 0; i < lff_hash_num; ++i) {
+    indices[i] = compute_indices(lff_indices[i], pir_params_.lff_nvec);
+    printf("nvec.size: %lu\n", pir_params_.lff_nvec.size());
+    printf("indices.size: %lu\n", indices.size());
+    assert(indices[i].size() == 1);
+    assert(lff_indices[i] == indices[i][0]);
+  }
+
+  PirQuery result(pir_params_.d);
+  int N = enc_params_.poly_modulus_degree();
+
+  // 处理每个维度
+  for (uint32_t i = 0; i < pir_params_.d; i++) {
+    Plaintext pt(enc_params_.poly_modulus_degree());
+
+    // 如果当前维度的明文数大于N，也就是一个明文放不下当前维度的query
+    // 需要num_ptxts个明文
+    uint64_t n_i = pir_params_.lff_nvec[i];
+    uint32_t num_ptxts = ceil((n_i + 0.0) / N);
+
+    for (uint32_t j = 0; j < num_ptxts; j++) {
+      pt.set_zero();
+
+      uint64_t total = N;
+      if (j == num_ptxts - 1) {
+        total = n_i % N;
+      }
+      uint64_t log_total = ceil(log2(total));
+
+      // 处理h_i(x)
+      for (uint32_t hash_idx = 0; hash_idx < indices.size(); ++hash_idx) {
+        // *****************************************似乎是下面这两行报过数组越界？
+        if (indices[hash_idx][i] >= N * j &&
+            indices[hash_idx][i] <= N * (j + 1)) {
+          uint64_t real_index = indices[hash_idx][i] - N * j;
 
           cout << "Client: Inverting " << pow(2, log_total) << endl;
           pt[real_index] =
@@ -158,15 +224,20 @@ uint64_t PIRClient::get_fv_offset(uint64_t element_index) {
   return element_index % pir_params_.elements_per_plaintext;
 }
 
-Plaintext PIRClient::decrypt(Ciphertext ct) {
+Plaintext PIRClient::decrypt(Ciphertext ct) const {
   Plaintext pt;
   decryptor_->decrypt(ct, pt);
   return pt;
 }
 
-uint64_t PIRClient::decode_reply(PirReply &reply, uint64_t offset) {
+uint64_t PIRClient::decode_bf_reply(PirReply &reply) {
   Plaintext result = decode_reply(reply);
-  return extract_bytes(result);
+  return extract_bf_bytes(result);
+}
+
+vector<uint8_t> PIRClient::decode_lff_reply(PirReply &reply) {
+  Plaintext result = decode_reply(reply);
+  return extract_lff_bytes(result);
 }
 
 // vector<uint64_t> PIRClient::extract_coeffs(Plaintext pt) {
@@ -190,7 +261,7 @@ uint64_t PIRClient::decode_reply(PirReply &reply, uint64_t offset) {
 //                                    (offset + 1) * coeffs_per_element);
 // }
 
-uint64_t PIRClient::extract_bytes(seal::Plaintext pt) {
+uint64_t PIRClient::extract_bf_bytes(seal::Plaintext pt) {
   uint32_t N = enc_params_.poly_modulus_degree();
   uint32_t logt = floor(log2(enc_params_.plain_modulus().value()));
   uint32_t bytes_per_ptxt = 1;
@@ -205,30 +276,22 @@ uint64_t PIRClient::extract_bytes(seal::Plaintext pt) {
   // encoder_->decode(pt, coeffs);
   printf("coeffs0: %lu\n", coeffs[0]);
   return coeffs[0];
-  // coeffs_to_bytes(logt, coeffs, elems.data(), bytes_per_ptxt,
-  //                 pir_params_.ele_size);
-  // return std::vector<uint8_t>(elems.begin() + offset * pir_params_.ele_size,
-  //                             elems.begin() +
-  //                                 (offset + 1) * pir_params_.ele_size);
 }
 
-// std::vector<uint8_t> PIRClient::extract_bytes(seal::Plaintext pt,
-//                                               uint64_t offset) {
-//   uint32_t N = enc_params_.poly_modulus_degree();
-//   uint32_t logt = floor(log2(enc_params_.plain_modulus().value()));
-//   uint32_t bytes_per_ptxt =
-//       pir_params_.elements_per_plaintext * pir_params_.ele_size;
+std::vector<uint8_t> PIRClient::extract_lff_bytes(seal::Plaintext pt) {
+  uint32_t N = enc_params_.poly_modulus_degree();
+  uint32_t logt = floor(log2(enc_params_.plain_modulus().value()));
 
-//   // Convert from FV plaintext (polynomial) to database element at the client
-//   vector<uint8_t> elems(bytes_per_ptxt);
-//   vector<uint64_t> coeffs;
-//   encoder_->decode(pt, coeffs);
-//   coeffs_to_bytes(logt, coeffs, elems.data(), bytes_per_ptxt,
-//                   pir_params_.ele_size);
-//   return std::vector<uint8_t>(elems.begin() + offset * pir_params_.ele_size,
-//                               elems.begin() +
-//                                   (offset + 1) * pir_params_.ele_size);
-// }
+  // Convert from FV plaintext (polynomial) to database element at the client
+  vector<uint8_t> elems(pir_params_.ele_size);
+  vector<uint64_t> coeffs(N);
+  for (uint64_t i = 0; i < N; ++i) {
+    coeffs[i] = pt[i];
+  }
+  coeffs_to_bytes(logt, coeffs, elems.data(), pir_params_.ele_size,
+                  pir_params_.ele_size);
+  return elems;
+}
 
 Plaintext PIRClient::decode_reply(PirReply &reply) {
   EncryptionParameters parms;

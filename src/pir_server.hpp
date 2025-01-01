@@ -10,16 +10,20 @@
 
 class PIRServer {
 public:
-  using DBType =
-      std::vector<std::pair<std::vector<uint8_t>, std::vector<uint8_t>>>;
+  const static std::uint8_t bf_id = 0;
+  const static std::uint8_t lff_id = 1;
+  using DBType = std::vector<std::pair<uint64_t, std::vector<uint8_t>>>;
+  // using DBType =
+  //     std::vector<std::pair<std::vector<uint8_t>, std::vector<uint8_t>>>;
   PIRServer(const seal::EncryptionParameters &enc_params,
-            const PirParams &pir_params);
+            const PirParams &pir_params, const PIRClient &client);
 
   // NOTE: server takes over ownership of db and frees it when it exits.
   // Caller cannot free db
-  void set_database(const DBType &db, std::uint64_t ele_num,
-                    std::uint64_t ele_size);
-  void set_database(std::unique_ptr<std::vector<seal::Plaintext>> &&db);
+  uint64_t set_database(const DBType &db_vec, std::uint64_t ele_num,
+                        std::uint64_t ele_size);
+  void set_database(std::unique_ptr<std::vector<seal::Plaintext>> &&bf_db,
+                    std::unique_ptr<std::vector<seal::Plaintext>> &&lff_db);
   // void set_database(const std::unique_ptr<const std::uint8_t[]> &bytes,
   //                   std::uint64_t ele_num, std::uint64_t ele_size);
   void preprocess_database();
@@ -29,7 +33,8 @@ public:
                                              std::uint32_t client_id);
 
   PirQuery deserialize_query(std::stringstream &stream);
-  PirReply generate_reply(PirQuery &query, std::uint32_t client_id);
+  PirReply generate_reply(PirQuery &query, std::uint32_t client_id,
+                          std::uint8_t db_id);
   // Serializes the reply into the provided stream and returns the number of
   // bytes written
   int serialize_reply(PirReply &reply, std::stringstream &stream);
@@ -46,7 +51,8 @@ public:
 private:
   seal::EncryptionParameters enc_params_; // SEAL parameters
   PirParams pir_params_;                  // PIR parameters
-  std::unique_ptr<Database> db_;
+  std::unique_ptr<Database> bf_db_;
+  std::unique_ptr<Database> lff_db_;
   bool is_db_preprocessed_;
   std::map<int, seal::GaloisKeys> galoisKeys_;
   std::unique_ptr<seal::Evaluator> evaluator_;
@@ -55,6 +61,8 @@ private:
 
   // This is only used for simple_query
   seal::Ciphertext one_;
+
+  const PIRClient &client_;
 
   void multiply_power_of_X(const seal::Ciphertext &encrypted,
                            seal::Ciphertext &destination, std::uint32_t index);

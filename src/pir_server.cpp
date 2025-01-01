@@ -1,9 +1,15 @@
 #include "pir_server.hpp"
 #include "bloom_filter.hpp"
+#include "long_fuse_filter.hpp"
+#include "pir.hpp"
 #include "pir_client.hpp"
+#include <algorithm>
 #include <cassert>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
+#include <seal/plaintext.h>
+#include <sys/types.h>
 #include <utility>
 #include <vector>
 
@@ -12,8 +18,8 @@ using namespace seal;
 using namespace seal::util;
 
 PIRServer::PIRServer(const EncryptionParameters &enc_params,
-                     const PirParams &pir_params)
-    : enc_params_(enc_params), pir_params_(pir_params),
+                     const PirParams &pir_params, const PIRClient &client)
+    : client_(client), enc_params_(enc_params), pir_params_(pir_params),
       is_db_preprocessed_(false) {
   context_ = make_shared<SEALContext>(enc_params, true);
   evaluator_ = make_unique<Evaluator>(*context_);
@@ -23,8 +29,12 @@ PIRServer::PIRServer(const EncryptionParameters &enc_params,
 void PIRServer::preprocess_database() {
   if (!is_db_preprocessed_) {
 
-    for (uint32_t i = 0; i < db_->size(); i++) {
-      evaluator_->transform_to_ntt_inplace(db_->operator[](i),
+    for (uint32_t i = 0; i < bf_db_->size(); i++) {
+      evaluator_->transform_to_ntt_inplace(bf_db_->operator[](i),
+                                           context_->first_parms_id());
+    }
+    for (uint32_t i = 0; i < lff_db_->size(); i++) {
+      evaluator_->transform_to_ntt_inplace(lff_db_->operator[](i),
                                            context_->first_parms_id());
     }
 
@@ -33,147 +43,88 @@ void PIRServer::preprocess_database() {
 }
 
 // Server takes over ownership of db and will free it when it exits
-void PIRServer::set_database(unique_ptr<vector<Plaintext>> &&db) {
-  if (!db) {
+void PIRServer::set_database(unique_ptr<vector<Plaintext>> &&bf_db,
+                             unique_ptr<vector<Plaintext>> &&lff_db) {
+  if (!bf_db || !lff_db) {
     throw invalid_argument("db cannot be null");
   }
 
-  db_ = move(db);
+  bf_db_ = std::move(bf_db);
+  lff_db_ = std::move(lff_db);
   is_db_preprocessed_ = false;
 }
 
-void PIRServer::set_database(const DBType &db_vec, uint64_t ele_num,
-                             uint64_t ele_size) {
+uint64_t PIRServer::set_database(const DBType &db_vec, uint64_t ele_num,
+                                 uint64_t ele_size) {
   assert(db_vec.size() == pir_params_.ele_num);
   uint32_t logt = floor(log2(enc_params_.plain_modulus().value()));
   uint32_t N = enc_params_.poly_modulus_degree();
 
-  // number of FV plaintexts needed to represent all elements
-  // uint64_t num_of_plaintexts = pir_params_.ele_num;
+  uint64_t ele_per_ptxt = pir_params_.elements_per_plaintext;
+  uint64_t bytes_per_ptxt = ele_per_ptxt * ele_size;
+  uint64_t db_size = ele_num * ele_size;
 
-  // number of FV plaintexts needed to create the d-dimensional matrix
-  uint64_t prod = 1;
-  for (uint32_t i = 0; i < pir_params_.nvec.size(); i++) {
-    prod *= pir_params_.nvec[i];
+  uint64_t bf_prod = 1;
+  for (uint32_t i = 0; i < pir_params_.d; i++) {
+    bf_prod *= pir_params_.bf_nvec[i];
   }
-  uint64_t matrix_plaintexts = prod;
+  uint64_t lff_prod = 1;
+  for (uint32_t i = 0; i < pir_params_.d; i++) {
+    lff_prod *= pir_params_.lff_nvec[i];
+  }
 
+  // *************************************************** encode bloom filter
   bloom_parameters bf_params = pir_params_.bf_params;
-  uint64_t number_of_hashes = bf_params.optimal_parameters.number_of_hashes;
+  uint64_t bf_number_of_hashes = bf_params.optimal_parameters.number_of_hashes;
 
   bloom_filter bf(bf_params);
   for (uint64_t i = 0; i < ele_num; ++i) {
-    assert(db_vec[i].first.size() == pir_params_.key_size);
-    bf.insert((char *)db_vec[i].first.data(), pir_params_.key_size);
+    bf.insert(db_vec[i].first);
   }
-  for (uint64_t i = 0; i < ele_size; ++i) {
-    vector<pair<uint64_t, uint64_t>> indices =
-        bf.get_indices(db_vec[i].first.data(), pir_params_.key_size);
-    assert(indices.size() == number_of_hashes);
-    for (uint64_t i = 0; i < number_of_hashes; ++i) {
-      assert(bf.get_bit_at(indices[i].first, indices[i].second) == 1);
-    }
-    assert(bf.contains((char *)db_vec[i].first.data(), pir_params_.key_size));
-  }
+  // for (uint64_t i = 0; i < ele_size; ++i) {
+  //   vector<pair<uint64_t, uint64_t>> indices =
+  //   bf.get_indices(db_vec[i].first);
+  // assert(indices.size() == number_of_hashes);
+  // for (uint64_t i = 0; i < number_of_hashes; ++i) {
+  //   assert(bf.get_bit_at(indices[i].first, indices[i].second) == 1);
+  // }
+  // assert(bf.contains((char *)db_vec[i].first, pir_params_.key_size));
+  // }
 
-  uint64_t num_of_plaintexts = pir_params_.num_of_plaintexts;
+  uint64_t bf_num_of_plaintexts =
+      pir_params_.bf_params.optimal_parameters.table_size;
   // assert(num_of_plaintexts == bf_params.optimal_parameters.table_size);
-  assert(num_of_plaintexts <= matrix_plaintexts);
-  auto result = make_unique<vector<Plaintext>>();
-  result->reserve(matrix_plaintexts);
+  printf("bf_prod: %lu, num_of_ptxt: %lu\n", bf_prod, bf_num_of_plaintexts);
+  assert(bf_num_of_plaintexts <= bf_prod);
+  auto bf_result = make_unique<vector<Plaintext>>();
+  bf_result->reserve(bf_prod);
 
-  uint64_t ele_per_ptxt = pir_params_.elements_per_plaintext;
-  uint64_t bytes_per_ptxt = ele_per_ptxt * ele_size;
-
-  uint64_t db_size = ele_num * ele_size;
-
-  // uint64_t coeff_per_ptxt =
-  //     ele_per_ptxt * coefficients_per_element(logt, ele_size);
-  // assert(coeff_per_ptxt <= N);
   cout << "Elements per plaintext: " << ele_per_ptxt << endl;
   // cout << "Coeff per ptxt: " << coeff_per_ptxt << endl;
   cout << "Bytes per plaintext: " << bytes_per_ptxt << endl;
-  cout << "Num of plaintexts: " << num_of_plaintexts << endl;
+  cout << "Num of plaintexts: " << bf_num_of_plaintexts << endl;
 
-  // uint32_t offset = 0;
-
-  for (uint64_t i = 0; i < num_of_plaintexts; ++i) {
-    // printf("%lu\n", i);
+  for (uint64_t i = 0; i < bf_num_of_plaintexts; ++i) {
     vector<uint64_t> coefficients;
-    coefficients.reserve(pir_params_.slot_count);
+    coefficients.reserve(N);
 
     uint8_t tmp_bit = bf.get_bit_at(i);
     coefficients.push_back((uint64_t)tmp_bit);
-    for (uint64_t j = 1; j < pir_params_.slot_count; ++j) {
+    for (uint64_t j = 1; j < N; ++j) {
       coefficients.push_back(1);
     }
 
-    Plaintext plain(pir_params_.slot_count);
-    for (uint64_t j = 0; j < pir_params_.slot_count; ++j) {
-      plain[j] = coefficients[j];
-    }
-    // encoder_->encode(coefficients, plain);
-    // cout << i << "-th encoded plaintext = " << plain.to_string() << endl;
-    result->push_back(move(plain));
+    Plaintext plain(N);
+    vector_to_plaintext(coefficients, plain);
+    // for (uint64_t j = 0; j < N; ++j) {
+    //   plain[j] = coefficients[j];
+    // }
+    bf_result->emplace_back(std::move(plain));
   }
 
-  // uint64_t n = 0;
-
-  // for (uint64_t i = 0; i < num_of_plaintexts; i++) {
-  //   uint64_t process_bytes = 0;
-
-  //   if (db_size <= offset) {
-  //     break;
-  //   } else if (db_size < offset + bytes_per_ptxt) {
-  //     process_bytes = db_size - offset;
-  //   } else {
-  //     process_bytes = bytes_per_ptxt;
-  //   }
-  //   assert(process_bytes % ele_size == 0);
-  //   uint64_t ele_in_chunk = process_bytes / ele_size;
-
-  //   // Get the coefficients of the elements that will be packed in plaintext
-  //   i vector<uint64_t> coefficients(coeff_per_ptxt); for (uint64_t ele = 0;
-  //   ele < ele_in_chunk; ele++) {
-  //     vector<uint64_t> element_coeffs = bytes_to_coeffs(
-  //         logt, bytes.get() + offset + (ele_size * ele), ele_size);
-  //     std::copy(element_coeffs.begin(), element_coeffs.end(),
-  //               coefficients.begin() +
-  //                   (coefficients_per_element(logt, ele_size) * ele));
-  //   }
-
-  //   offset += process_bytes;
-
-  //   uint64_t used = coefficients.size();
-
-  //   assert(used <= coeff_per_ptxt);
-
-  //   // Pad the rest with 1s
-  //   for (uint64_t j = 0; j < (pir_params_.slot_count - used); j++) {
-  //     coefficients.push_back(1);
-  //   }
-
-  //   bf.insert(i);
-  //   vector<pair<uint64_t, uint64_t>> indices = bf.get_indices(i);
-  //   assert(indices.size() == bf.get_hash_cnt());
-  //   for (uint64_t i = 0; i < bf.get_hash_cnt(); ++i) {
-  //     assert(bf.get_bit_at(indices[i].first, indices[i].second) == 1);
-  //   }
-  //   assert(bf.contains(i));
-  //   if (i == 0) {
-  //     printf("111111111111111111111111 %lu\n", bf.get_hash_cnt());
-  //     printf("11111111111111111111111 %llu\n", bf.get_table_size());
-  //   }
-
-  //   Plaintext plain;
-  //   encoder_->encode(coefficients, plain);
-  //   // cout << i << "-th encoded plaintext = " << plain.to_string() << endl;
-  //   result->push_back(move(plain));
-  // }
-
   // Add padding to make database a matrix
-  uint64_t current_plaintexts = result->size();
-  assert(current_plaintexts <= num_of_plaintexts);
+  uint64_t bf_current_plaintexts = bf_result->size();
+  assert(bf_current_plaintexts <= bf_num_of_plaintexts);
 
 #ifdef DEBUG
   cout << "adding: " << matrix_plaintexts - current_plaintexts
@@ -184,14 +135,97 @@ void PIRServer::set_database(const DBType &db_vec, uint64_t ele_num,
 #endif
 
   vector<uint64_t> padding(N, 1);
-
-  for (uint64_t i = 0; i < (matrix_plaintexts - current_plaintexts); i++) {
+  for (uint64_t i = 0; i < (bf_prod - bf_current_plaintexts); i++) {
     Plaintext plain;
     vector_to_plaintext(padding, plain);
-    result->push_back(plain);
+    bf_result->emplace_back(std::move(plain));
   }
 
-  set_database(move(result));
+  // ************************************************* encode long fuse filter
+  long_fuse_params lff_params = pir_params_.lff_params;
+  long_fuse_t lff;
+  long_fuse_allocate(lff_params, &lff);
+  // uint64_t n = 0;
+
+  uint64_t lff_value_long_length = lff_params.ValueLongLength;
+  assert(lff_value_long_length <= N);
+  uint64_t lff_num_of_plaintexts = lff_params.ArrayLength;
+
+  vector<pair<uint64_t, vector<uint64_t>>> lff_kv_map;
+  lff_kv_map.reserve(ele_num);
+  for (uint64_t i = 0; i < ele_num; ++i) {
+    assert(db_vec[i].second.size() == ele_size);
+    // ****************************************************Todo!!!!!
+    // ****************************************************concat keyvalue map
+    vector<uint64_t> kv_concat_coeff =
+        bytes_to_coeffs(logt, db_vec[i].second.data(), ele_size);
+    assert(kv_concat_coeff.size() == lff_value_long_length);
+
+    pair<uint64_t, vector<uint64_t>> kv_pair =
+        make_pair(db_vec[i].first, std::move(kv_concat_coeff));
+    lff_kv_map.emplace_back(std::move(kv_pair));
+  }
+  assert(lff_kv_map.size() == ele_num);
+
+  for (uint64_t i = 0; i < ele_num; ++i) {
+    assert(lff_kv_map[i].second.size() == lff_value_long_length);
+  }
+  assert(long_fuse_populate(lff_kv_map, ele_num, lff_value_long_length,
+                            enc_params_.plain_modulus().value(), &lff));
+  assert(lff.Fingerprints.size() == lff_num_of_plaintexts);
+
+  for (uint64_t i = 0; i < ele_num; ++i) {
+    vector<uint64_t> tmp = long_fuse_decode(lff_kv_map[i].first, &lff);
+    assert(tmp.size() == lff_value_long_length);
+    for (uint64_t j = 0; j < lff_value_long_length; ++j) {
+      assert(tmp[j] == lff_kv_map[i].second[j]);
+    }
+
+    vector<uint8_t> tmp_elems(ele_size);
+    assert(tmp_elems.size() == ele_size);
+    coeffs_to_bytes(logt, tmp, tmp_elems.data(), ele_size, ele_size);
+    for (uint64_t j = 0; j < ele_size; ++j) {
+      assert(tmp_elems[j] == db_vec[i].second[j]);
+    }
+  }
+
+  auto lff_result = make_unique<vector<Plaintext>>();
+  lff_result->reserve(lff_prod);
+  for (uint64_t i = 0; i < lff_num_of_plaintexts; ++i) {
+    vector<uint64_t> coefficients(N);
+    assert(lff.Fingerprints[i].size() == lff_value_long_length);
+    memcpy(coefficients.data(), lff.Fingerprints[i].data(),
+           lff_value_long_length * sizeof(uint64_t));
+
+    for (uint64_t j = lff_value_long_length; j < N; ++j) {
+      coefficients[j] = 1;
+    }
+
+    Plaintext plain;
+    vector_to_plaintext(coefficients, plain);
+    lff_result->emplace_back(std::move(plain));
+  }
+
+  uint64_t lff_current_plaintexts = lff_result->size();
+  assert(lff_current_plaintexts <= lff_num_of_plaintexts);
+
+#ifdef DEBUG
+  cout << "adding: " << matrix_plaintexts - current_plaintexts
+       << " FV plaintexts of padding (equivalent to: "
+       << (matrix_plaintexts - current_plaintexts) *
+              elements_per_ptxt(logt, N, ele_size)
+       << " elements)" << endl;
+#endif
+
+  for (uint64_t i = 0; i < (lff_prod - lff_current_plaintexts); i++) {
+    Plaintext plain;
+    vector_to_plaintext(padding, plain);
+    lff_result->emplace_back(std::move(plain));
+  }
+
+  set_database(std::move(bf_result), std::move(lff_result));
+  lff_params.Seed = lff.params.Seed;
+  return lff.params.Seed;
 }
 
 void PIRServer::set_galois_key(uint32_t client_id, seal::GaloisKeys galkey) {
@@ -205,8 +239,8 @@ PirQuery PIRServer::deserialize_query(stringstream &stream) {
     // number of ciphertexts needed to encode the index for dimension i
     // keeping into account that each ciphertext can encode up to
     // poly_modulus_degree indexes In most cases this is usually 1.
-    uint32_t ctx_per_dimension =
-        ceil((pir_params_.nvec[i] + 0.0) / enc_params_.poly_modulus_degree());
+    uint32_t ctx_per_dimension = ceil((pir_params_.bf_nvec[i] + 0.0) /
+                                      enc_params_.poly_modulus_degree());
 
     vector<Ciphertext> cs;
     for (uint32_t j = 0; j < ctx_per_dimension; j++) {
@@ -230,9 +264,17 @@ int PIRServer::serialize_reply(PirReply &reply, stringstream &stream) {
   return output_size;
 }
 
-PirReply PIRServer::generate_reply(PirQuery &query, uint32_t client_id) {
-
-  vector<uint64_t> nvec = pir_params_.nvec;
+PirReply PIRServer::generate_reply(PirQuery &query, uint32_t client_id,
+                                   uint8_t db_id) {
+  vector<uint64_t> nvec;
+  vector<Plaintext> *cur;
+  if (db_id == bf_id) {
+    nvec = pir_params_.bf_nvec;
+    cur = bf_db_.get();
+  } else if (db_id == lff_id) {
+    nvec = pir_params_.lff_nvec;
+    cur = lff_db_.get();
+  }
   uint64_t product = 1;
 
   for (uint32_t i = 0; i < nvec.size(); i++) {
@@ -241,7 +283,6 @@ PirReply PIRServer::generate_reply(PirQuery &query, uint32_t client_id) {
 
   auto coeff_count = enc_params_.poly_modulus_degree();
 
-  vector<Plaintext> *cur = db_.get();
   vector<Plaintext> intermediate_plain; // decompose....
 
   auto pool = MemoryManager::GetPool();
@@ -478,21 +519,21 @@ inline void PIRServer::multiply_power_of_X(const Ciphertext &encrypted,
   }
 }
 
-void PIRServer::simple_set(uint64_t index, Plaintext pt) {
-  if (is_db_preprocessed_) {
-    evaluator_->transform_to_ntt_inplace(pt, context_->first_parms_id());
-  }
-  db_->operator[](index) = pt;
-}
+// void PIRServer::simple_set(uint64_t index, Plaintext pt) {
+//   if (is_db_preprocessed_) {
+//     evaluator_->transform_to_ntt_inplace(pt, context_->first_parms_id());
+//   }
+//   db_->operator[](index) = pt;
+// }
 
-Ciphertext PIRServer::simple_query(uint64_t index) {
-  // There is no transform_from_ntt that takes a plaintext
-  Ciphertext ct;
-  Plaintext pt = db_->operator[](index);
-  evaluator_->multiply_plain(one_, pt, ct);
-  evaluator_->transform_from_ntt_inplace(ct);
-  return ct;
-}
+// Ciphertext PIRServer::simple_query(uint64_t index) {
+//   // There is no transform_from_ntt that takes a plaintext
+//   Ciphertext ct;
+//   Plaintext pt = db_->operator[](index);
+//   evaluator_->multiply_plain(one_, pt, ct);
+//   evaluator_->transform_from_ntt_inplace(ct);
+//   return ct;
+// }
 
 void PIRServer::set_one_ct(Ciphertext one) {
   one_ = one;

@@ -20,6 +20,7 @@
       // highly unlikely
 #endif
 
+static uint32_t lff_hash_num = 3;
 static int long_fuse_cmpfunc(const void *a, const void *b) {
   return (*(const uint64_t *)a - *(const uint64_t *)b);
 }
@@ -60,6 +61,16 @@ static inline uint32_t long_fuse_reduce(uint32_t hash, uint32_t n) {
 static inline uint64_t long_fuse_fingerprint(uint64_t hash) {
   return hash ^ (hash >> 32);
 }
+static inline void test_long_fuse_addi(std::vector<uint64_t> &p,
+                                       const std::vector<uint64_t> &q,
+                                       uint64_t valueLength,
+                                       uint64_t valueModulus) {
+  assert(p.size() == valueLength && q.size() == valueLength);
+  for (uint64_t i = 0; i < valueLength; ++i) {
+    p[i] += q[i];
+    p[i] %= valueModulus;
+  }
+}
 static inline void long_fuse_addi(std::vector<uint64_t> &p,
                                   const std::vector<uint64_t> &q,
                                   uint64_t valueLength, uint64_t valueModulus) {
@@ -67,7 +78,9 @@ static inline void long_fuse_addi(std::vector<uint64_t> &p,
   for (uint64_t i = 0; i < valueLength; ++i) {
     int64_t tmp_p = (int64_t)p[i], tmp_q = (int64_t)q[i];
     tmp_p += tmp_q;
-    tmp_p %= (int64_t)valueModulus;
+    tmp_p = ((tmp_p % (int64_t)valueModulus) + (int64_t)valueModulus) %
+            (int64_t)valueModulus;
+    // tmp_p %= (int64_t)valueModulus;
     p[i] = (uint64_t)tmp_p;
     // p[i] += q[i];
     // p[i] %= (int64_t)valueModulus;
@@ -80,7 +93,9 @@ static inline void long_fuse_subi(std::vector<uint64_t> &p,
   for (uint64_t i = 0; i < valueLength; ++i) {
     int64_t tmp_p = (int64_t)p[i], tmp_q = (int64_t)q[i];
     tmp_p -= tmp_q;
-    tmp_p %= (int64_t)valueModulus;
+    tmp_p = ((tmp_p % (int64_t)valueModulus) + (int64_t)valueModulus) %
+            (int64_t)valueModulus;
+    // tmp_p %= (int64_t)valueModulus;
     p[i] = (uint64_t)tmp_p;
     // p[i] -= q[i];
     // p[i] %= (int64_t)valueModulus;
@@ -219,6 +234,11 @@ long_fuse_decode(uint64_t key, const long_fuse_t *filter) {
   uint64_t hash = long_fuse_mix_split(key, filter->params.Seed);
   //   uint8_t f = long_fuse_fingerprint(hash);
   long_hashes_t hashes = long_fuse_hash_batch(hash, filter->params);
+  if (key == 0) {
+    printf("seed: %lu\n", filter->params.Seed);
+    printf("hash: %lu\n", hash);
+    printf("!!!!!!!!!!!!hashes: %u, %u, %u\n", hashes.h0, hashes.h1, hashes.h2);
+  }
   std::vector<uint64_t> res(filter->params.ValueLongLength, 0);
   long_fuse_addi(res, filter->Fingerprints[hashes.h0],
                  filter->params.ValueLongLength, filter->params.ValueModulus);
@@ -262,45 +282,45 @@ static inline double long_fuse_calculate_size_factor(uint32_t arity,
     return 2.0;
   }
 }
-
-// allocate enough capacity for a set containing up to 'size' elements
-// caller is responsible to call long_fuse_free(filter)
-// size should be at least 2.
-static inline bool long_fuse_allocate(uint32_t size, uint64_t valueLongLength,
-                                      uint64_t valueModulus,
-                                      long_fuse_t *filter) {
+static inline void long_fuse_gen_params(uint32_t size, uint64_t valueLongLength,
+                                        uint64_t valueModulus,
+                                        long_fuse_params &params) {
   uint32_t arity = 3;
-  filter->params.SegmentLength =
+  params.SegmentLength =
       size == 0 ? 4 : long_fuse_calculate_segment_length(arity, size);
-  if (filter->params.SegmentLength > 262144) {
-    filter->params.SegmentLength = 262144;
+  if (params.SegmentLength > 262144) {
+    params.SegmentLength = 262144;
   }
-  filter->params.SegmentLengthMask = filter->params.SegmentLength - 1;
+  params.SegmentLengthMask = params.SegmentLength - 1;
   double sizeFactor =
       size <= 1 ? 0 : long_fuse_calculate_size_factor(arity, size);
   uint32_t capacity =
       size <= 1 ? 0 : (uint32_t)(round((double)size * sizeFactor));
-  uint32_t initSegmentCount = (capacity + filter->params.SegmentLength - 1) /
-                                  filter->params.SegmentLength -
-                              (arity - 1);
-  filter->params.ArrayLength =
-      (initSegmentCount + arity - 1) * filter->params.SegmentLength;
-  filter->params.SegmentCount =
-      (filter->params.ArrayLength + filter->params.SegmentLength - 1) /
-      filter->params.SegmentLength;
-  if (filter->params.SegmentCount <= arity - 1) {
-    filter->params.SegmentCount = 1;
+  uint32_t initSegmentCount =
+      (capacity + params.SegmentLength - 1) / params.SegmentLength -
+      (arity - 1);
+  params.ArrayLength = (initSegmentCount + arity - 1) * params.SegmentLength;
+  params.SegmentCount =
+      (params.ArrayLength + params.SegmentLength - 1) / params.SegmentLength;
+  if (params.SegmentCount <= arity - 1) {
+    params.SegmentCount = 1;
   } else {
-    filter->params.SegmentCount = filter->params.SegmentCount - (arity - 1);
+    params.SegmentCount = params.SegmentCount - (arity - 1);
   }
-  filter->params.ArrayLength =
-      (filter->params.SegmentCount + arity - 1) * filter->params.SegmentLength;
-  filter->params.SegmentCountLength =
-      filter->params.SegmentCount * filter->params.SegmentLength;
+  params.ArrayLength = (params.SegmentCount + arity - 1) * params.SegmentLength;
+  params.SegmentCountLength = params.SegmentCount * params.SegmentLength;
 
-  filter->params.ValueLongLength = valueLongLength;
-  filter->params.ValueModulus = valueModulus;
+  params.ValueLongLength = valueLongLength;
+  params.ValueModulus = valueModulus;
+}
+// allocate enough capacity for a set containing up to 'size' elements
+// caller is responsible to call long_fuse_free(filter)
+// size should be at least 2.
+static inline bool long_fuse_allocate(const long_fuse_params &params,
+                                      long_fuse_t *filter) {
+  // long_fuse_gen_params(size, valueLongLength, valueModulus, filter->params);
 
+  filter->params = params;
   filter->Fingerprints.resize(filter->params.ArrayLength);
   // filter->Fingerprints =
   //     (int64_t **)malloc(filter->ArrayLength * sizeof(int64_t *));
@@ -405,6 +425,8 @@ static inline bool long_fuse_populate(
       uint64_t hash =
           long_fuse_murmur64(keyValueMap[i].first + filter->params.Seed);
       hashValueMap[hash] = keyValueMap[i].second;
+      // printf("hashvalue map size: %lu, valuelonglength: %lu\n",
+      //        hashValueMap[hash].size(), filter->params.ValueLongLength);
       assert(hashValueMap[hash].size() == filter->params.ValueLongLength);
 
       uint64_t segment_index = hash >> (64 - blockBits);
@@ -516,6 +538,7 @@ static inline bool long_fuse_populate(
   assert(filter->Fingerprints.size() == filter->params.ArrayLength);
   for (uint64_t i = 0; i < filter->params.ArrayLength; ++i) {
     assert(filter->Fingerprints[i].size() == filter->params.ValueLongLength);
+    // filter->Fingerprints[i][0] = 1;
     std::fill(filter->Fingerprints[i].begin(), filter->Fingerprints[i].end(),
               1);
   }

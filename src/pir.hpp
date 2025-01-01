@@ -1,6 +1,7 @@
 #pragma once
 
 #include "bloom_filter.hpp"
+#include "long_fuse_filter.hpp"
 #include "seal/seal.h"
 #include "seal/util/polyarithsmallmod.h"
 #include <cassert>
@@ -18,16 +19,36 @@ struct PirParams {
   bool enable_batching;
   bool enable_mswitching;
   std::uint64_t ele_num;
-  std::uint64_t key_size;
+  // std::uint64_t key_size;
   std::uint64_t ele_size;
   std::uint64_t elements_per_plaintext;
-  std::uint64_t num_of_plaintexts; // number of plaintexts in database
-  std::uint32_t d;                 // number of dimensions for the database
-  std::uint32_t expansion_ratio;   // ratio of ciphertext to plaintext
-  std::vector<std::uint64_t> nvec; // size of each of the d dimensions
-  std::uint32_t slot_count;
+  std::uint32_t d;               // number of dimensions for the database
+  std::uint32_t expansion_ratio; // ratio of ciphertext to plaintext
+
+  // std::uint64_t num_of_plaintexts; // number of plaintexts in database
+  std::vector<std::uint64_t> bf_nvec;  // size of each of the d dimensions
+  std::vector<std::uint64_t> lff_nvec; // size of each of the d dimensions
+  // std::uint32_t slot_count;
   bloom_parameters bf_params;
+  long_fuse_params lff_params;
 };
+
+// struct PirParamsForLFF {
+//   bool enable_symmetric;
+//   bool enable_batching;
+//   bool enable_mswitching;
+//   std::uint64_t ele_num;
+//   // std::uint64_t key_size;
+//   std::uint64_t ele_size;
+//   std::uint64_t elements_per_plaintext;
+//   std::uint64_t num_of_plaintexts; // number of plaintexts in database
+//   std::uint32_t d;                 // number of dimensions for the database
+//   std::uint32_t expansion_ratio;   // ratio of ciphertext to plaintext
+//   std::vector<std::uint64_t> nvec; // size of each of the d dimensions
+//   long_fuse_params lff_params;
+//   // std::uint32_t slot_count;
+//   // bloom_parameters bf_params;
+// };
 
 void gen_encryption_params(std::uint32_t N,    // degree of polynomial
                            std::uint32_t logt, // bits of plaintext coefficient
@@ -44,7 +65,7 @@ void gen_params(uint64_t ele_num, uint64_t ele_size, uint32_t N, uint32_t logt,
 
 void verify_encryption_params(const seal::EncryptionParameters &enc_params);
 
-void print_pir_params(const PirParams &pir_params);
+// void print_pir_params(const PirParams &pir_params);
 void print_seal_params(const seal::EncryptionParameters &enc_params);
 
 std::vector<std::uint64_t> get_dimensions(std::uint64_t num_of_plaintexts,
