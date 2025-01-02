@@ -1,13 +1,16 @@
 #include "pir_server.hpp"
 #include "bloom_filter.hpp"
 #include "long_fuse_filter.hpp"
+#include "murmur_hash.hpp"
 #include "pir.hpp"
 #include "pir_client.hpp"
 #include <algorithm>
 #include <cassert>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <seal/ciphertext.h>
 #include <seal/plaintext.h>
 #include <sys/types.h>
 #include <utility>
@@ -23,7 +26,6 @@ PIRServer::PIRServer(const EncryptionParameters &enc_params,
       is_db_preprocessed_(false) {
   context_ = make_shared<SEALContext>(enc_params, true);
   evaluator_ = make_unique<Evaluator>(*context_);
-  // encoder_ = make_unique<BatchEncoder>(*context_);
 }
 
 void PIRServer::preprocess_database() {
@@ -54,8 +56,8 @@ void PIRServer::set_database(unique_ptr<vector<Plaintext>> &&bf_db,
   is_db_preprocessed_ = false;
 }
 
-uint64_t PIRServer::set_database(const DBType &db_vec, uint64_t ele_num,
-                                 uint64_t ele_size) {
+vector<uint64_t> PIRServer::set_database(const DBType &db_vec, uint64_t ele_num,
+                                         uint64_t ele_size) {
   assert(db_vec.size() == pir_params_.ele_num);
   uint32_t logt = floor(log2(enc_params_.plain_modulus().value()));
   uint32_t N = enc_params_.poly_modulus_degree();
@@ -65,15 +67,17 @@ uint64_t PIRServer::set_database(const DBType &db_vec, uint64_t ele_num,
   uint64_t db_size = ele_num * ele_size;
 
   uint64_t bf_prod = 1;
-  for (uint32_t i = 0; i < pir_params_.d; i++) {
+  for (uint32_t i = 0; i < pir_params_.bf_d; i++) {
     bf_prod *= pir_params_.bf_nvec[i];
   }
   uint64_t lff_prod = 1;
-  for (uint32_t i = 0; i < pir_params_.d; i++) {
+  for (uint32_t i = 0; i < pir_params_.lff_d; i++) {
     lff_prod *= pir_params_.lff_nvec[i];
   }
 
-  // *************************************************** encode bloom filter
+  /*********************************************************************
+  encode bloom filter
+  *********************************************************************/
   bloom_parameters bf_params = pir_params_.bf_params;
   uint64_t bf_number_of_hashes = bf_params.optimal_parameters.number_of_hashes;
 
@@ -81,15 +85,6 @@ uint64_t PIRServer::set_database(const DBType &db_vec, uint64_t ele_num,
   for (uint64_t i = 0; i < ele_num; ++i) {
     bf.insert(db_vec[i].first);
   }
-  // for (uint64_t i = 0; i < ele_size; ++i) {
-  //   vector<pair<uint64_t, uint64_t>> indices =
-  //   bf.get_indices(db_vec[i].first);
-  // assert(indices.size() == number_of_hashes);
-  // for (uint64_t i = 0; i < number_of_hashes; ++i) {
-  //   assert(bf.get_bit_at(indices[i].first, indices[i].second) == 1);
-  // }
-  // assert(bf.contains((char *)db_vec[i].first, pir_params_.key_size));
-  // }
 
   uint64_t bf_num_of_plaintexts =
       pir_params_.bf_params.optimal_parameters.table_size;
@@ -141,73 +136,85 @@ uint64_t PIRServer::set_database(const DBType &db_vec, uint64_t ele_num,
     bf_result->emplace_back(std::move(plain));
   }
 
-  // ************************************************* encode long fuse filter
+  /*********************************************************************
+  encode long fuse filter
+  *********************************************************************/
+  uint64_t lff_filter_num = 1;
+  for (uint32_t i = 1; i < pir_params_.lff_d; i++) {
+    lff_filter_num *= pir_params_.lff_nvec[i];
+  }
   long_fuse_params lff_params = pir_params_.lff_params;
-  long_fuse_t lff;
-  long_fuse_allocate(lff_params, &lff);
-  // uint64_t n = 0;
+  vector<long_fuse_t> lff(lff_filter_num);
+  for (uint64_t i = 0; i < lff_filter_num; ++i) {
+    long_fuse_allocate(lff_params, &lff[i]);
+  }
 
+  /***************
+  generate sub key-value(long) maps
+  ***************/
+  vector<KVMapType> lff_sub_kv_maps(lff_filter_num);
+  for (uint64_t i = 0; i < lff_filter_num; ++i) {
+    lff_sub_kv_maps[i].reserve(pir_params_.max_lff_filter_size);
+  }
   uint64_t lff_value_long_length = lff_params.ValueLongLength;
   assert(lff_value_long_length <= N);
-  uint64_t lff_num_of_plaintexts = lff_params.ArrayLength;
 
-  vector<pair<uint64_t, vector<uint64_t>>> lff_kv_map;
-  lff_kv_map.reserve(ele_num);
-  for (uint64_t i = 0; i < ele_num; ++i) {
-    assert(db_vec[i].second.size() == ele_size);
-    // ****************************************************Todo!!!!!
-    // ****************************************************concat keyvalue map
-    vector<uint64_t> kv_concat_coeff =
-        bytes_to_coeffs(logt, db_vec[i].second.data(), ele_size);
-    assert(kv_concat_coeff.size() == lff_value_long_length);
+  seal::Blake2xbPRNGFactory factory;
+  auto gen = factory.create();
+  uint32_t lff_partition_seed;
+  bool isContinue = true;
+  while (isContinue) {
+    lff_partition_seed = gen->generate();
+    for (uint64_t i = 0; i < ele_num; ++i) {
+      uint32_t filter_idx =
+          murmurhash(reinterpret_cast<const char *>(&db_vec[i].first),
+                     sizeof(db_vec[i].first), lff_partition_seed);
+      filter_idx %= lff_filter_num;
 
-    pair<uint64_t, vector<uint64_t>> kv_pair =
-        make_pair(db_vec[i].first, std::move(kv_concat_coeff));
-    lff_kv_map.emplace_back(std::move(kv_pair));
-  }
-  assert(lff_kv_map.size() == ele_num);
-
-  for (uint64_t i = 0; i < ele_num; ++i) {
-    assert(lff_kv_map[i].second.size() == lff_value_long_length);
-  }
-  assert(long_fuse_populate(lff_kv_map, ele_num, lff_value_long_length,
-                            enc_params_.plain_modulus().value(), &lff));
-  assert(lff.Fingerprints.size() == lff_num_of_plaintexts);
-
-  for (uint64_t i = 0; i < ele_num; ++i) {
-    vector<uint64_t> tmp = long_fuse_decode(lff_kv_map[i].first, &lff);
-    assert(tmp.size() == lff_value_long_length);
-    for (uint64_t j = 0; j < lff_value_long_length; ++j) {
-      assert(tmp[j] == lff_kv_map[i].second[j]);
+      vector<uint64_t> coeffs =
+          bytes_to_coeffs(logt, db_vec[i].second.data(), ele_size);
+      pair<uint64_t, vector<uint64_t>> kv_pair =
+          make_pair(db_vec[i].first, std::move(coeffs));
+      lff_sub_kv_maps[filter_idx].emplace_back(std::move(kv_pair));
     }
 
-    vector<uint8_t> tmp_elems(ele_size);
-    assert(tmp_elems.size() == ele_size);
-    coeffs_to_bytes(logt, tmp, tmp_elems.data(), ele_size, ele_size);
-    for (uint64_t j = 0; j < ele_size; ++j) {
-      assert(tmp_elems[j] == db_vec[i].second[j]);
+    isContinue = false;
+    // printf("max length: %lu\n", pir_params_.max_lff_filter_size);
+    for (uint64_t i = 0; i < lff_filter_num; ++i) {
+      // printf("i: %lu, sub map length: %lu\n", i, lff_sub_kv_maps[i].size());
+      if (lff_sub_kv_maps[i].size() > pir_params_.max_lff_filter_size) {
+        isContinue = true;
+        break;
+      }
     }
+  }
+
+  for (uint64_t i = 0; i < lff_filter_num; ++i) {
+    assert(long_fuse_populate(lff_sub_kv_maps[i], lff_sub_kv_maps[i].size(),
+                              lff_value_long_length,
+                              enc_params_.plain_modulus().value(), &lff[i]));
   }
 
   auto lff_result = make_unique<vector<Plaintext>>();
   lff_result->reserve(lff_prod);
-  for (uint64_t i = 0; i < lff_num_of_plaintexts; ++i) {
-    vector<uint64_t> coefficients(N);
-    assert(lff.Fingerprints[i].size() == lff_value_long_length);
-    memcpy(coefficients.data(), lff.Fingerprints[i].data(),
-           lff_value_long_length * sizeof(uint64_t));
+  for (uint64_t i = 0; i < lff_params.ArrayLength; ++i) {
+    for (uint64_t filter_idx = 0; filter_idx < lff_filter_num; ++filter_idx) {
+      vector<uint64_t> coefficients(N);
+      assert(lff[filter_idx].Fingerprints[i].size() == lff_value_long_length);
+      memcpy(coefficients.data(), lff[filter_idx].Fingerprints[i].data(),
+             lff_value_long_length * sizeof(uint64_t));
 
-    for (uint64_t j = lff_value_long_length; j < N; ++j) {
-      coefficients[j] = 1;
+      for (uint64_t j = lff_value_long_length; j < N; ++j) {
+        coefficients[j] = 1;
+      }
+
+      Plaintext plain;
+      vector_to_plaintext(coefficients, plain);
+      lff_result->emplace_back(std::move(plain));
     }
-
-    Plaintext plain;
-    vector_to_plaintext(coefficients, plain);
-    lff_result->emplace_back(std::move(plain));
   }
 
   uint64_t lff_current_plaintexts = lff_result->size();
-  assert(lff_current_plaintexts <= lff_num_of_plaintexts);
 
 #ifdef DEBUG
   cout << "adding: " << matrix_plaintexts - current_plaintexts
@@ -224,36 +231,41 @@ uint64_t PIRServer::set_database(const DBType &db_vec, uint64_t ele_num,
   }
 
   set_database(std::move(bf_result), std::move(lff_result));
-  lff_params.Seed = lff.params.Seed;
-  return lff.params.Seed;
+
+  vector<uint64_t> seed_vec(lff_filter_num + 1);
+  seed_vec[0] = lff_partition_seed;
+  for (uint64_t i = 0; i < lff_filter_num; ++i) {
+    seed_vec[i + 1] = lff[i].Seed;
+  }
+  return seed_vec;
 }
 
 void PIRServer::set_galois_key(uint32_t client_id, seal::GaloisKeys galkey) {
   galoisKeys_[client_id] = galkey;
 }
 
-PirQuery PIRServer::deserialize_query(stringstream &stream) {
-  PirQuery q;
+// PirQuery PIRServer::deserialize_query(stringstream &stream) {
+//   PirQuery q;
 
-  for (uint32_t i = 0; i < pir_params_.d; i++) {
-    // number of ciphertexts needed to encode the index for dimension i
-    // keeping into account that each ciphertext can encode up to
-    // poly_modulus_degree indexes In most cases this is usually 1.
-    uint32_t ctx_per_dimension = ceil((pir_params_.bf_nvec[i] + 0.0) /
-                                      enc_params_.poly_modulus_degree());
+//   for (uint32_t i = 0; i < pir_params_.d; i++) {
+//     // number of ciphertexts needed to encode the index for dimension i
+//     // keeping into account that each ciphertext can encode up to
+//     // poly_modulus_degree indexes In most cases this is usually 1.
+//     uint32_t ctx_per_dimension = ceil((pir_params_.bf_nvec[i] + 0.0) /
+//                                       enc_params_.poly_modulus_degree());
 
-    vector<Ciphertext> cs;
-    for (uint32_t j = 0; j < ctx_per_dimension; j++) {
-      Ciphertext c;
-      c.load(*context_, stream);
-      cs.push_back(c);
-    }
+//     vector<Ciphertext> cs;
+//     for (uint32_t j = 0; j < ctx_per_dimension; j++) {
+//       Ciphertext c;
+//       c.load(*context_, stream);
+//       cs.push_back(c);
+//     }
 
-    q.push_back(cs);
-  }
+//     q.push_back(cs);
+//   }
 
-  return q;
-}
+//   return q;
+// }
 
 int PIRServer::serialize_reply(PirReply &reply, stringstream &stream) {
   int output_size = 0;
@@ -275,6 +287,7 @@ PirReply PIRServer::generate_reply(PirQuery &query, uint32_t client_id,
     nvec = pir_params_.lff_nvec;
     cur = lff_db_.get();
   }
+  vector<Ciphertext> intermediate_cipher;
   uint64_t product = 1;
 
   for (uint32_t i = 0; i < nvec.size(); i++) {
@@ -320,17 +333,19 @@ PirReply PIRServer::generate_reply(PirQuery &query, uint32_t client_id,
     }
 
     // Transform expanded query to NTT, and ...
-    for (uint32_t jj = 0; jj < expanded_query.size(); jj++) {
-      evaluator_->transform_to_ntt_inplace(expanded_query[jj]);
+    if (i == 0) {
+      for (uint32_t jj = 0; jj < expanded_query.size(); jj++) {
+        evaluator_->transform_to_ntt_inplace(expanded_query[jj]);
+      }
     }
 
     // Transform plaintext to NTT. If database is pre-processed, can skip
-    if ((!is_db_preprocessed_) || i > 0) {
-      for (uint32_t jj = 0; jj < cur->size(); jj++) {
-        evaluator_->transform_to_ntt_inplace((*cur)[jj],
-                                             context_->first_parms_id());
-      }
-    }
+    // if ((!is_db_preprocessed_) || i > 0) {
+    //   for (uint32_t jj = 0; jj < cur->size(); jj++) {
+    //     evaluator_->transform_to_ntt_inplace((*cur)[jj],
+    //                                          context_->first_parms_id());
+    //   }
+    // }
 
     for (uint64_t k = 0; k < product; k++) {
       if ((*cur)[k].is_zero()) {
@@ -343,51 +358,73 @@ PirReply PIRServer::generate_reply(PirQuery &query, uint32_t client_id,
     vector<Ciphertext> intermediateCtxts(product);
     Ciphertext temp;
 
-    for (uint64_t k = 0; k < product; k++) {
+    if (i == 0) {
+      for (uint64_t k = 0; k < product; k++) {
 
-      evaluator_->multiply_plain(expanded_query[0], (*cur)[k],
-                                 intermediateCtxts[k]);
+        evaluator_->multiply_plain(expanded_query[0], (*cur)[k],
+                                   intermediateCtxts[k]);
 
-      for (uint64_t j = 1; j < n_i; j++) {
-        evaluator_->multiply_plain(expanded_query[j], (*cur)[k + j * product],
-                                   temp);
-        evaluator_->add_inplace(intermediateCtxts[k],
-                                temp); // Adds to first component.
+        for (uint64_t j = 1; j < n_i; j++) {
+          evaluator_->multiply_plain(expanded_query[j], (*cur)[k + j * product],
+                                     temp);
+          evaluator_->add_inplace(intermediateCtxts[k],
+                                  temp); // Adds to first component.
+        }
+      }
+    } else {
+      for (uint64_t k = 0; k < product; k++) {
+
+        evaluator_->multiply(expanded_query[0], intermediate_cipher[k],
+                             intermediateCtxts[k]);
+
+        for (uint64_t j = 1; j < n_i; j++) {
+          evaluator_->multiply(expanded_query[j],
+                               intermediate_cipher[k + j * product], temp);
+          evaluator_->add_inplace(intermediateCtxts[k],
+                                  temp); // Adds to first component.
+        }
       }
     }
-
-    for (uint32_t jj = 0; jj < intermediateCtxts.size(); jj++) {
-      evaluator_->transform_from_ntt_inplace(intermediateCtxts[jj]);
-      // print intermediate ctxts?
-      // cout << "const term of ctxt " << jj << " = " <<
-      // intermediateCtxts[jj][0] << endl;
+    if (i == 0) {
+      for (uint32_t jj = 0; jj < intermediateCtxts.size(); jj++) {
+        evaluator_->transform_from_ntt_inplace(intermediateCtxts[jj]);
+      }
     }
 
     if (i == nvec.size() - 1) {
+      assert(intermediateCtxts.size() == 1);
       return intermediateCtxts;
     } else {
-      intermediate_plain.clear();
-      intermediate_plain.reserve(pir_params_.expansion_ratio * product);
-      cur = &intermediate_plain;
-
-      for (uint64_t rr = 0; rr < product; rr++) {
+      intermediate_cipher.clear();
+      intermediate_cipher.reserve(product);
+      for (uint64_t rr = 0; rr < product; ++rr) {
         EncryptionParameters parms;
-        if (pir_params_.enable_mswitching) {
-          evaluator_->mod_switch_to_inplace(intermediateCtxts[rr],
-                                            context_->last_parms_id());
-          parms = context_->last_context_data()->parms();
-        } else {
-          parms = context_->first_context_data()->parms();
-        }
 
-        vector<Plaintext> plains =
-            decompose_to_plaintexts(parms, intermediateCtxts[rr]);
-
-        for (uint32_t jj = 0; jj < plains.size(); jj++) {
-          intermediate_plain.emplace_back(plains[jj]);
-        }
+        intermediate_cipher.emplace_back(std::move(intermediateCtxts[rr]));
       }
-      product = intermediate_plain.size(); // multiply by expansion rate.
+
+      // intermediate_plain.clear();
+      // intermediate_plain.reserve(pir_params_.expansion_ratio * product);
+      // cur = &intermediate_plain;
+
+      // for (uint64_t rr = 0; rr < product; rr++) {
+      //   EncryptionParameters parms;
+      //   if (pir_params_.enable_mswitching) {
+      //     evaluator_->mod_switch_to_inplace(intermediateCtxts[rr],
+      //                                       context_->last_parms_id());
+      //     parms = context_->last_context_data()->parms();
+      //   } else {
+      //     parms = context_->first_context_data()->parms();
+      //   }
+
+      //   vector<Plaintext> plains =
+      //       decompose_to_plaintexts(parms, intermediateCtxts[rr]);
+
+      //   for (uint32_t jj = 0; jj < plains.size(); jj++) {
+      //     intermediate_plain.emplace_back(plains[jj]);
+      //   }
+      // }
+      // product = intermediate_plain.size(); // multiply by expansion rate.
     }
     cout << "Server: " << i + 1 << "-th recursion level finished " << endl;
     cout << endl;

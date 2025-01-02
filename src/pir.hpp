@@ -22,10 +22,14 @@ struct PirParams {
   // std::uint64_t key_size;
   std::uint64_t ele_size;
   std::uint64_t elements_per_plaintext;
-  std::uint32_t d;               // number of dimensions for the database
   std::uint32_t expansion_ratio; // ratio of ciphertext to plaintext
 
   // std::uint64_t num_of_plaintexts; // number of plaintexts in database
+  double epsilon;
+  std::uint32_t bf_d; // number of dimensions for the database
+  std::uint32_t lff_d;
+  std::uint64_t max_bf_filter_size;
+  std::uint64_t max_lff_filter_size;
   std::vector<std::uint64_t> bf_nvec;  // size of each of the d dimensions
   std::vector<std::uint64_t> lff_nvec; // size of each of the d dimensions
   // std::uint32_t slot_count;
@@ -55,7 +59,8 @@ void gen_encryption_params(std::uint32_t N,    // degree of polynomial
                            seal::EncryptionParameters &enc_params);
 
 void gen_pir_params(uint64_t ele_num, uint64_t ele_size, uint64_t key_size,
-                    uint32_t d, const seal::EncryptionParameters &enc_params,
+                    uint32_t bf_d, uint32_t lff_d, double epsilon,
+                    const seal::EncryptionParameters &enc_params,
                     PirParams &pir_params, bool enable_symmetric = false,
                     bool enable_batching = true, bool enable_mswitching = true);
 

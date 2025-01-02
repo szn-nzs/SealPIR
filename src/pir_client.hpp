@@ -1,6 +1,7 @@
 #pragma once
 
 #include "pir.hpp"
+#include <cstdint>
 #include <memory>
 #include <vector>
 
@@ -8,9 +9,11 @@ using namespace std;
 
 class PIRClient {
 public:
+  const static std::uint8_t bf_id = 0;
+  const static std::uint8_t lff_id = 1;
   PIRClient(const seal::EncryptionParameters &encparms,
             const PirParams &pir_params);
-  void set_seed(std::uint64_t seed);
+  void set_seed(std::vector<std::uint64_t> seed);
 
   // PirQuery generate_query(std::uint64_t desiredIndex);
   PirQuery generate_bf_query(uint64_t desiredKey);
@@ -19,7 +22,7 @@ public:
   // written
   int generate_serialized_query(std::uint64_t desiredIndex,
                                 std::stringstream &stream);
-  seal::Plaintext decode_reply(PirReply &reply);
+  seal::Plaintext decode_reply(PirReply &reply, uint8_t db_id);
 
   std::vector<uint64_t> extract_coeffs(seal::Plaintext pt);
   std::vector<uint64_t> extract_coeffs(seal::Plaintext pt,
@@ -58,6 +61,7 @@ private:
 
   // vector<vector<uint64_t>> indices_; // the indices for retrieval.
   vector<uint64_t> inverse_scales_;
+  vector<uint64_t> seed_;
 
   friend class PIRServer;
 };

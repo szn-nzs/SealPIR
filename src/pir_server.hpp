@@ -13,6 +13,7 @@ public:
   const static std::uint8_t bf_id = 0;
   const static std::uint8_t lff_id = 1;
   using DBType = std::vector<std::pair<uint64_t, std::vector<uint8_t>>>;
+  using KVMapType = std::vector<std::pair<uint64_t, std::vector<uint64_t>>>;
   // using DBType =
   //     std::vector<std::pair<std::vector<uint8_t>, std::vector<uint8_t>>>;
   PIRServer(const seal::EncryptionParameters &enc_params,
@@ -20,8 +21,9 @@ public:
 
   // NOTE: server takes over ownership of db and frees it when it exits.
   // Caller cannot free db
-  uint64_t set_database(const DBType &db_vec, std::uint64_t ele_num,
-                        std::uint64_t ele_size);
+  std::vector<uint64_t> set_database(const DBType &db_vec,
+                                     std::uint64_t ele_num,
+                                     std::uint64_t ele_size);
   void set_database(std::unique_ptr<std::vector<seal::Plaintext>> &&bf_db,
                     std::unique_ptr<std::vector<seal::Plaintext>> &&lff_db);
   // void set_database(const std::unique_ptr<const std::uint8_t[]> &bytes,

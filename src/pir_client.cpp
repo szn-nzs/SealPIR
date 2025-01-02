@@ -1,8 +1,13 @@
 #include "pir_client.hpp"
 #include "long_fuse_filter.hpp"
+#include "murmur_hash.hpp"
+#include "pir.hpp"
+#include <algorithm>
 #include <cassert>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
+#include <seal/plaintext.h>
 #include <vector>
 
 using namespace std;
@@ -34,7 +39,7 @@ PIRClient::PIRClient(const EncryptionParameters &enc_params,
   // indices_.resize(pir_params_.bf_params.optimal_parameters.number_of_hashes);
 }
 
-void PIRClient::set_seed(uint64_t seed) { pir_params_.lff_params.Seed = seed; }
+void PIRClient::set_seed(vector<uint64_t> seed) { seed_ = std::move(seed); }
 
 // int PIRClient::generate_serialized_query(uint64_t desiredIndex,
 //                                          std::stringstream &stream) {
@@ -97,11 +102,11 @@ PirQuery PIRClient::generate_bf_query(uint64_t desiredKey) {
     assert(desiredIndex == indices[i][0]);
   }
 
-  PirQuery result(pir_params_.d);
+  PirQuery result(pir_params_.bf_d);
   int N = enc_params_.poly_modulus_degree();
 
   // 处理每个维度
-  for (uint32_t i = 0; i < pir_params_.d; i++) {
+  for (uint32_t i = 0; i < pir_params_.bf_d; i++) {
     Plaintext pt(enc_params_.poly_modulus_degree());
 
     // 如果当前维度的明文数大于N，也就是一个明文放不下当前维度的query
@@ -150,34 +155,47 @@ PirQuery PIRClient::generate_bf_query(uint64_t desiredKey) {
 }
 
 PirQuery PIRClient::generate_lff_query(uint64_t desiredKey) {
+  uint64_t lff_filter_num = 1;
+  vector<uint64_t> tmp_nvec(pir_params_.lff_d - 1);
+  for (uint32_t i = 1; i < pir_params_.lff_d; i++) {
+    lff_filter_num *= pir_params_.lff_nvec[i];
+    tmp_nvec[i - 1] = pir_params_.lff_nvec[i];
+  }
+
+  uint64_t lff_partition_seed = seed_[0];
+  uint32_t filter_idx = murmurhash(reinterpret_cast<const char *>(&desiredKey),
+                                   sizeof(desiredKey), lff_partition_seed);
+  filter_idx %= lff_filter_num;
+
   long_fuse_params params = pir_params_.lff_params;
-  uint64_t hash = long_fuse_mix_split(desiredKey, params.Seed);
+  uint64_t hash = long_fuse_mix_split(desiredKey, seed_[filter_idx + 1]);
   long_hashes_t hashes = long_fuse_hash_batch(hash, params);
   vector<uint64_t> lff_indices({hashes.h0, hashes.h1, hashes.h2});
   // printf("h0: %u, h1: %u, h2: %u\n", hashes.h0, hashes.h1, hashes.h2);
   assert(lff_indices.size() == lff_hash_num);
 
-  // 把三个哈希值分别分成d维
   vector<vector<uint64_t>> indices;
-  indices.resize(lff_hash_num);
-  for (size_t i = 0; i < lff_hash_num; ++i) {
-    indices[i] = compute_indices(lff_indices[i], pir_params_.lff_nvec);
-    printf("nvec.size: %lu\n", pir_params_.lff_nvec.size());
-    printf("indices.size: %lu\n", indices.size());
-    assert(indices[i].size() == 1);
-    assert(lff_indices[i] == indices[i][0]);
+  indices.resize(pir_params_.lff_d);
+  indices[0].resize(lff_hash_num);
+  indices[0][0] = hashes.h0;
+  indices[0][1] = hashes.h1;
+  indices[0][2] = hashes.h2;
+  vector<uint64_t> tmp_indices = compute_indices(filter_idx, tmp_nvec);
+  for (uint64_t i = 1; i < pir_params_.lff_d; ++i) {
+    indices[i].push_back(tmp_indices[i - 1]);
   }
 
-  PirQuery result(pir_params_.d);
+  PirQuery result(pir_params_.lff_d);
   int N = enc_params_.poly_modulus_degree();
 
   // 处理每个维度
-  for (uint32_t i = 0; i < pir_params_.d; i++) {
+  for (uint32_t i = 0; i < pir_params_.lff_d; i++) {
     Plaintext pt(enc_params_.poly_modulus_degree());
 
     // 如果当前维度的明文数大于N，也就是一个明文放不下当前维度的query
     // 需要num_ptxts个明文
     uint64_t n_i = pir_params_.lff_nvec[i];
+    printf("i: %u, ni: %lu\n", i, n_i);
     uint32_t num_ptxts = ceil((n_i + 0.0) / N);
 
     for (uint32_t j = 0; j < num_ptxts; j++) {
@@ -190,11 +208,10 @@ PirQuery PIRClient::generate_lff_query(uint64_t desiredKey) {
       uint64_t log_total = ceil(log2(total));
 
       // 处理h_i(x)
-      for (uint32_t hash_idx = 0; hash_idx < indices.size(); ++hash_idx) {
+      for (uint32_t idx = 0; idx < indices[i].size(); ++idx) {
         // *****************************************似乎是下面这两行报过数组越界？
-        if (indices[hash_idx][i] >= N * j &&
-            indices[hash_idx][i] <= N * (j + 1)) {
-          uint64_t real_index = indices[hash_idx][i] - N * j;
+        if (indices[i][idx] >= N * j && indices[i][idx] <= N * (j + 1)) {
+          uint64_t real_index = indices[i][idx] - N * j;
 
           cout << "Client: Inverting " << pow(2, log_total) << endl;
           pt[real_index] =
@@ -231,12 +248,12 @@ Plaintext PIRClient::decrypt(Ciphertext ct) const {
 }
 
 uint64_t PIRClient::decode_bf_reply(PirReply &reply) {
-  Plaintext result = decode_reply(reply);
+  Plaintext result = decode_reply(reply, bf_id);
   return extract_bf_bytes(result);
 }
 
 vector<uint8_t> PIRClient::decode_lff_reply(PirReply &reply) {
-  Plaintext result = decode_reply(reply);
+  Plaintext result = decode_reply(reply, lff_id);
   return extract_lff_bytes(result);
 }
 
@@ -293,72 +310,85 @@ std::vector<uint8_t> PIRClient::extract_lff_bytes(seal::Plaintext pt) {
   return elems;
 }
 
-Plaintext PIRClient::decode_reply(PirReply &reply) {
-  EncryptionParameters parms;
-  parms_id_type parms_id;
-  if (pir_params_.enable_mswitching) {
-    parms = context_->last_context_data()->parms();
-    parms_id = context_->last_parms_id();
-  } else {
-    parms = context_->first_context_data()->parms();
-    parms_id = context_->first_parms_id();
-  }
-  uint32_t exp_ratio = compute_expansion_ratio(parms);
-  uint32_t recursion_level = pir_params_.d;
-
-  vector<Ciphertext> temp = reply;
-  uint32_t ciphertext_size = temp[0].size();
-
-  uint64_t t = enc_params_.plain_modulus().value();
-
-  for (uint32_t i = 0; i < recursion_level; i++) {
-    cout << "Client: " << i + 1 << "/ " << recursion_level
-         << "-th decryption layer started." << endl;
-    vector<Ciphertext> newtemp;
-    vector<Plaintext> tempplain;
-
-    for (uint32_t j = 0; j < temp.size(); j++) {
-      Plaintext ptxt;
-      decryptor_->decrypt(temp[j], ptxt);
-#ifdef DEBUG
-      cout << "Client: reply noise budget = "
-           << decryptor_->invariant_noise_budget(temp[j]) << endl;
-#endif
-
-      // cout << "decoded (and scaled) plaintext = " << ptxt.to_string() <<
-      // endl;
-      tempplain.push_back(ptxt);
-
-#ifdef DEBUG
-      cout << "recursion level : " << i << " noise budget :  ";
-      cout << decryptor_->invariant_noise_budget(temp[j]) << endl;
-#endif
-
-      if ((j + 1) % (exp_ratio * ciphertext_size) == 0 && j > 0) {
-        // Combine into one ciphertext.
-        Ciphertext combined(*context_, parms_id);
-        compose_to_ciphertext(parms, tempplain, combined);
-        newtemp.push_back(combined);
-        tempplain.clear();
-        // cout << "Client: const term of ciphertext = " << combined[0] << endl;
-      }
-    }
-    cout << "Client: done." << endl;
-    cout << endl;
-    if (i == recursion_level - 1) {
-      assert(temp.size() == 1);
-      return tempplain[0];
-    } else {
-      tempplain.clear();
-      temp = newtemp;
-    }
-  }
-
-  // This should never be called
-  assert(0);
-  Plaintext fail;
-  return fail;
+Plaintext PIRClient::decode_reply(PirReply &reply, uint8_t db_id) {
+  assert(reply.size() == 1);
+  Plaintext res;
+  decryptor_->decrypt(reply[0], res);
+  return res;
 }
+
+// Plaintext PIRClient::decode_reply(PirReply &reply, uint8_t db_id) {
+//   EncryptionParameters parms;
+//   parms_id_type parms_id;
+//   if (pir_params_.enable_mswitching) {
+//     parms = context_->last_context_data()->parms();
+//     parms_id = context_->last_parms_id();
+//   } else {
+//     parms = context_->first_context_data()->parms();
+//     parms_id = context_->first_parms_id();
+//   }
+//   uint32_t exp_ratio = compute_expansion_ratio(parms);
+//   uint32_t recursion_level;
+//   if (db_id == bf_id) {
+//     recursion_level = pir_params_.bf_d;
+//   } else {
+//     recursion_level = pir_params_.lff_d;
+//   }
+
+//   vector<Ciphertext> temp = reply;
+//   uint32_t ciphertext_size = temp[0].size();
+
+//   uint64_t t = enc_params_.plain_modulus().value();
+
+//   for (uint32_t i = 0; i < recursion_level; i++) {
+//     cout << "Client: " << i + 1 << "/ " << recursion_level
+//          << "-th decryption layer started." << endl;
+//     vector<Ciphertext> newtemp;
+//     vector<Plaintext> tempplain;
+
+//     for (uint32_t j = 0; j < temp.size(); j++) {
+//       Plaintext ptxt;
+//       decryptor_->decrypt(temp[j], ptxt);
+// #ifdef DEBUG
+//       cout << "Client: reply noise budget = "
+//            << decryptor_->invariant_noise_budget(temp[j]) << endl;
+// #endif
+
+//       // cout << "decoded (and scaled) plaintext = " << ptxt.to_string() <<
+//       // endl;
+//       tempplain.push_back(ptxt);
+
+// #ifdef DEBUG
+//       cout << "recursion level : " << i << " noise budget :  ";
+//       cout << decryptor_->invariant_noise_budget(temp[j]) << endl;
+// #endif
+
+//       if ((j + 1) % (exp_ratio * ciphertext_size) == 0 && j > 0) {
+//         // Combine into one ciphertext.
+//         Ciphertext combined(*context_, parms_id);
+//         compose_to_ciphertext(parms, tempplain, combined);
+//         newtemp.push_back(combined);
+//         tempplain.clear();
+//         // cout << "Client: const term of ciphertext = " << combined[0] <<
+//         endl;
+//       }
+//     }
+//     cout << "Client: done." << endl;
+//     cout << endl;
+//     if (i == recursion_level - 1) {
+//       assert(temp.size() == 1);
+//       return tempplain[0];
+//     } else {
+//       tempplain.clear();
+//       temp = newtemp;
+//     }
+//   }
+
+//   // This should never be called
+//   assert(0);
+//   Plaintext fail;
+//   return fail;
+// }
 
 GaloisKeys PIRClient::generate_galois_keys() {
   // Generate the Galois keys needed for coeff_select.

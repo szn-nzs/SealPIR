@@ -114,7 +114,6 @@ static inline uint64_t long_fuse_rng_splitmix64(uint64_t *seed) {
   return z ^ (z >> 31);
 }
 typedef struct long_fuse_parameters {
-  uint64_t Seed;
   uint32_t SegmentLength;
   uint32_t SegmentLengthMask;
   uint32_t SegmentCount;
@@ -126,6 +125,7 @@ typedef struct long_fuse_parameters {
 
 typedef struct long_fuse_s {
   long_fuse_params params;
+  uint64_t Seed;
   std::vector<std::vector<uint64_t>> Fingerprints;
   // int64_t **Fingerprints;
 } long_fuse_t;
@@ -231,11 +231,11 @@ static inline uint32_t long_fuse_hash(int index, uint64_t hash,
 // Report if the key is in the set, with false positive rate.
 static inline std::vector<uint64_t>
 long_fuse_decode(uint64_t key, const long_fuse_t *filter) {
-  uint64_t hash = long_fuse_mix_split(key, filter->params.Seed);
+  uint64_t hash = long_fuse_mix_split(key, filter->Seed);
   //   uint8_t f = long_fuse_fingerprint(hash);
   long_hashes_t hashes = long_fuse_hash_batch(hash, filter->params);
   if (key == 0) {
-    printf("seed: %lu\n", filter->params.Seed);
+    printf("seed: %lu\n", filter->Seed);
     printf("hash: %lu\n", hash);
     printf("!!!!!!!!!!!!hashes: %u, %u, %u\n", hashes.h0, hashes.h1, hashes.h2);
   }
@@ -348,7 +348,7 @@ static inline void long_fuse_free(long_fuse_t *filter) {
   // }
   // free(filter->Fingerprints);
   // filter->Fingerprints = NULL;
-  filter->params.Seed = 0;
+  filter->Seed = 0;
   filter->params.SegmentLength = 0;
   filter->params.SegmentLengthMask = 0;
   filter->params.SegmentCount = 0;
@@ -368,7 +368,7 @@ static inline bool long_fuse_populate(
     uint32_t size, uint64_t valueLongLength, uint64_t valueModulus,
     long_fuse_t *filter) {
   uint64_t rng_counter = 0x726b2b9d438b9d4d;
-  filter->params.Seed = long_fuse_rng_splitmix64(&rng_counter);
+  filter->Seed = long_fuse_rng_splitmix64(&rng_counter);
   uint64_t *reverseOrder = (uint64_t *)calloc((size + 1), sizeof(uint64_t));
   uint32_t capacity = filter->params.ArrayLength;
   uint32_t *alone = (uint32_t *)malloc(capacity * sizeof(uint32_t));
@@ -422,8 +422,7 @@ static inline bool long_fuse_populate(
       // for (auto iter = keyValueMap.begin(); iter != keyValueMap.end();
       // ++iter) {
       // ***********************************
-      uint64_t hash =
-          long_fuse_murmur64(keyValueMap[i].first + filter->params.Seed);
+      uint64_t hash = long_fuse_murmur64(keyValueMap[i].first + filter->Seed);
       hashValueMap[hash] = keyValueMap[i].second;
       // printf("hashvalue map size: %lu, valuelonglength: %lu\n",
       //        hashValueMap[hash].size(), filter->params.ValueLongLength);
@@ -476,7 +475,7 @@ static inline bool long_fuse_populate(
       memset(reverseOrder, 0, sizeof(uint64_t) * size);
       memset(t2count, 0, sizeof(uint8_t) * capacity);
       memset(t2hash, 0, sizeof(uint64_t) * capacity);
-      filter->params.Seed = long_fuse_rng_splitmix64(&rng_counter);
+      filter->Seed = long_fuse_rng_splitmix64(&rng_counter);
       continue;
     }
 
@@ -532,7 +531,7 @@ static inline bool long_fuse_populate(
     memset(reverseOrder, 0, sizeof(uint64_t) * size);
     memset(t2count, 0, sizeof(uint8_t) * capacity);
     memset(t2hash, 0, sizeof(uint64_t) * capacity);
-    filter->params.Seed = long_fuse_rng_splitmix64(&rng_counter);
+    filter->Seed = long_fuse_rng_splitmix64(&rng_counter);
   }
 
   assert(filter->Fingerprints.size() == filter->params.ArrayLength);

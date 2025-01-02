@@ -21,12 +21,14 @@ int main(int argc, char *argv[]) {
 
   uint64_t number_of_items = 1 << 10;
   uint64_t size_per_key = 16;
-  uint64_t size_per_item = 100; // in bytes
-  uint32_t N = 4096;
+  uint64_t size_per_item = 1; // in bytes
+  uint32_t N = 8192;
 
   // Recommended values: (logt, d) = (20, 2).
   uint32_t logt = 20;
-  uint32_t d = 1;
+  uint32_t bf_d = 1;
+  uint32_t lff_d = 2;
+  double epsilon = 0.6;
   bool use_symmetric = true; // use symmetric encryption instead of public key
                              // (recommended for smaller query)
   bool use_batching = true;  // pack as many elements as possible into a BFV
@@ -46,8 +48,8 @@ int main(int argc, char *argv[]) {
   cout << "Main: SEAL parameters are good" << endl;
 
   cout << "Main: Generating PIR parameters" << endl;
-  gen_pir_params(number_of_items, size_per_item, size_per_key, d, enc_params,
-                 pir_params, use_symmetric, use_batching,
+  gen_pir_params(number_of_items, size_per_item, size_per_key, bf_d, lff_d,
+                 epsilon, enc_params, pir_params, use_symmetric, use_batching,
                  use_recursive_mod_switching);
 
   print_seal_params(enc_params);
@@ -134,7 +136,8 @@ int main(int argc, char *argv[]) {
 
   // Measure database setup
   auto time_pre_s = high_resolution_clock::now();
-  uint64_t seed = server.set_database(db, number_of_items, size_per_item);
+  vector<uint64_t> seed =
+      server.set_database(db, number_of_items, size_per_item);
   server.preprocess_database();
   client.set_seed(seed);
   auto time_pre_e = high_resolution_clock::now();
@@ -155,7 +158,7 @@ int main(int argc, char *argv[]) {
   for (size_t i = 0; i < number_of_items; ++i) {
     // Measure query generation
     auto time_query_s = high_resolution_clock::now();
-    PirQuery bf_query = client.generate_bf_query(db[i].first);
+    // PirQuery bf_query = client.generate_bf_query(db[i].first);
     PirQuery lff_query = client.generate_lff_query(db[i].first);
     auto time_query_e = high_resolution_clock::now();
     auto time_query_us =
@@ -167,7 +170,7 @@ int main(int argc, char *argv[]) {
     auto time_server_s = high_resolution_clock::now();
     // Answer PIR query from client 0. If there are multiple clients,
     // enter the id of the client (to use the associated galois key).
-    PirReply bf_reply = server.generate_reply(bf_query, 0, PIRServer::bf_id);
+    // PirReply bf_reply = server.generate_reply(bf_query, 0, PIRServer::bf_id);
     PirReply lff_reply = server.generate_reply(lff_query, 0, PIRServer::lff_id);
     auto time_server_e = high_resolution_clock::now();
     auto time_server_us =
@@ -176,7 +179,7 @@ int main(int argc, char *argv[]) {
 
     // Measure response extraction
     auto time_decode_s = chrono::high_resolution_clock::now();
-    uint64_t bf_elems = client.decode_bf_reply(bf_reply);
+    // uint64_t bf_elems = client.decode_bf_reply(bf_reply);
     vector<uint8_t> lff_elems = client.decode_lff_reply(lff_reply);
     // vector<uint8_t> elems = client.decode_reply(reply, offset);
     auto time_decode_e = chrono::high_resolution_clock::now();
@@ -186,11 +189,12 @@ int main(int argc, char *argv[]) {
 
     bool failed = false;
     // Check that we retrieved the correct element
-    if (bf_elems != pir_params.bf_params.optimal_parameters.number_of_hashes) {
-      cout << "BF query result wrong. result: " << bf_elems << endl;
-      failed = true;
-      return -1;
-    }
+    // if (bf_elems != pir_params.bf_params.optimal_parameters.number_of_hashes)
+    // {
+    //   cout << "BF query result wrong. result: " << bf_elems << endl;
+    //   failed = true;
+    //   return -1;
+    // }
     assert(lff_elems.size() == size_per_item);
     for (uint32_t j = 0; j < size_per_item; ++j) {
       if (lff_elems[j] != db[i].second[j]) {

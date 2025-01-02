@@ -1,8 +1,13 @@
 #include "pir.hpp"
 #include "bloom_filter.hpp"
 #include "long_fuse_filter.hpp"
+#include <algorithm>
+#include <cassert>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
+#include <sys/types.h>
+#include <vector>
 
 using namespace std;
 using namespace seal;
@@ -70,7 +75,8 @@ void verify_encryption_params(const seal::EncryptionParameters &enc_params) {
 }
 
 void gen_pir_params(uint64_t ele_num, uint64_t ele_size, uint64_t key_size,
-                    uint32_t d, const EncryptionParameters &enc_params,
+                    uint32_t bf_d, uint32_t lff_d, double epsilon,
+                    const EncryptionParameters &enc_params,
                     PirParams &pir_params, bool enable_symmetric,
                     bool enable_batching, bool enable_mswitching) {
   std::uint32_t N = enc_params.poly_modulus_degree();
@@ -79,41 +85,11 @@ void gen_pir_params(uint64_t ele_num, uint64_t ele_size, uint64_t key_size,
   // std::uint64_t elements_per_plaintext;
   // std::uint64_t num_of_plaintexts;
 
-  // if (enable_batching) {
-  //   elements_per_plaintext = elements_per_ptxt(logt, N, ele_size);
-  //   num_of_plaintexts = plaintexts_per_db(logt, N, ele_num, ele_size);
-  // } else {
-  //   elements_per_plaintext = 1;
-  //   num_of_plaintexts = ele_num;
-  // }
-
   uint32_t expansion_ratio = 0;
   for (uint32_t i = 0; i < enc_params.coeff_modulus().size(); ++i) {
     double logqi = log2(enc_params.coeff_modulus()[i].value());
     expansion_ratio += ceil(logqi / logt);
   }
-
-  // generate bloom filter params
-  pir_params.bf_params.projected_element_count = ele_num;
-  pir_params.bf_params.false_positive_probability = 0.01;
-  pir_params.bf_params.random_seed = 0xA5A5A5A5;
-  if (!pir_params.bf_params) {
-    printf("invalid set of bloom filter parameters\n");
-  }
-  pir_params.bf_params.compute_optimal_parameters();
-  // generate fuse filter params
-
-  uint64_t lff_coeff_per_ptxt = coefficients_per_element(logt, ele_size);
-  assert(lff_coeff_per_ptxt <= N);
-  long_fuse_gen_params(ele_num, lff_coeff_per_ptxt, t.value(),
-                       pir_params.lff_params);
-
-  // uint64_t num_of_plaintexts =
-  //     pir_params.bf_params.optimal_parameters.table_size;
-  // vector<uint64_t> nvec_for_bf =
-  //     get_dimensions(pir_params.bf_params.optimal_parameters.table_size, d);
-  // vector<uint64_t> nvec_for_lff =
-  //     get_dimensions(pir_params.lff_params.ArrayLength, d);
 
   pir_params.enable_symmetric = enable_symmetric;
   pir_params.enable_batching = enable_batching;
@@ -124,12 +100,60 @@ void gen_pir_params(uint64_t ele_num, uint64_t ele_size, uint64_t key_size,
   pir_params.elements_per_plaintext = 1;
   // pir_params.elements_per_plaintext = elements_per_plaintext;
   // pir_params.num_of_plaintexts = num_of_plaintexts;
-  pir_params.d = d;
+  pir_params.epsilon = epsilon;
+  pir_params.bf_d = bf_d;
+  pir_params.lff_d = lff_d;
   pir_params.expansion_ratio = expansion_ratio << 1;
-  pir_params.bf_nvec =
-      get_dimensions(pir_params.bf_params.optimal_parameters.table_size, d);
-  pir_params.lff_nvec = get_dimensions(pir_params.lff_params.ArrayLength, d);
-  // pir_params.slot_count = N;
+
+  /*************************************************
+  generate bf_nvec
+  **************************************************/
+  pir_params.bf_nvec.resize(bf_d);
+  pir_params.max_bf_filter_size =
+      max(static_cast<uint32_t>(2),
+          static_cast<uint32_t>(floor(pow(ele_num, 1.0 / bf_d))));
+  pir_params.bf_params.projected_element_count = pir_params.max_bf_filter_size;
+  pir_params.bf_params.false_positive_probability = 0.01;
+  pir_params.bf_params.random_seed = 0xA5A5A5A5;
+  if (!pir_params.bf_params) {
+    printf("invalid set of bloom filter parameters\n");
+  }
+  pir_params.bf_params.compute_optimal_parameters();
+  pir_params.bf_nvec[0] = pir_params.bf_params.optimal_parameters.table_size;
+  if (bf_d == 1) {
+    assert(pir_params.max_bf_filter_size == ele_num);
+  } else {
+    vector<uint64_t> bf_nvec =
+        get_dimensions(ceil((1 + epsilon) * (double)ele_num /
+                            (double)pir_params.max_bf_filter_size),
+                       bf_d - 1);
+    memcpy(pir_params.bf_nvec.data() + 1, bf_nvec.data(),
+           (bf_d - 1) * sizeof(uint64_t));
+  }
+
+  /*************************************************
+  generate lff_nvec
+  **************************************************/
+  pir_params.lff_nvec.resize(lff_d);
+  pir_params.max_lff_filter_size =
+      max(static_cast<uint32_t>(2),
+          static_cast<uint32_t>(floor(pow(ele_num, 1.0 / lff_d))));
+
+  uint64_t lff_coeff_per_ptxt = coefficients_per_element(logt, ele_size);
+  assert(lff_coeff_per_ptxt <= N);
+  long_fuse_gen_params(pir_params.max_lff_filter_size, lff_coeff_per_ptxt,
+                       t.value(), pir_params.lff_params);
+  pir_params.lff_nvec[0] = pir_params.lff_params.ArrayLength;
+  if (lff_d == 1) {
+    assert(pir_params.max_lff_filter_size == ele_num);
+  } else {
+    vector<uint64_t> lff_nvec =
+        get_dimensions(ceil((1 + epsilon) * (double)ele_num /
+                            (double)pir_params.max_lff_filter_size),
+                       lff_d - 1);
+    memcpy(pir_params.lff_nvec.data() + 1, lff_nvec.data(),
+           (lff_d - 1) * sizeof(uint64_t));
+  }
 }
 
 void print_pir_params(const PirParams &pir_params) {
@@ -142,7 +166,7 @@ void print_pir_params(const PirParams &pir_params) {
   cout << "element size: " << pir_params.ele_size << endl;
   cout << "elements per BFV plaintext: " << pir_params.elements_per_plaintext
        << endl;
-  cout << "dimensions for d-dimensional hyperrectangle: " << pir_params.d
+  cout << "dimensions for d-dimensional hyperrectangle: " << pir_params.bf_d
        << endl;
   // cout << "number of BFV plaintexts (before padding): "
   //      << pir_params.num_of_plaintexts << endl;
