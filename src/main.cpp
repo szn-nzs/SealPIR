@@ -9,6 +9,7 @@
 #include <cstdio>
 #include <memory>
 #include <random>
+#include <seal/ciphertext.h>
 #include <seal/seal.h>
 #include <utility>
 #include <vector>
@@ -19,13 +20,13 @@ using namespace seal;
 
 int main(int argc, char *argv[]) {
 
-  uint64_t number_of_items = 1 << 10;
+  uint64_t number_of_items = 1 << 7;
   uint64_t size_per_key = 16;
   uint64_t size_per_item = 1; // in bytes
   uint32_t N = 8192;
 
   // Recommended values: (logt, d) = (20, 2).
-  uint32_t logt = 20;
+  uint32_t logt = 8;
   uint32_t bf_d = 1;
   uint32_t lff_d = 2;
   double epsilon = 0.6;
@@ -63,7 +64,7 @@ int main(int argc, char *argv[]) {
 
   // Initialize PIR Server
   cout << "Main: Initializing server" << endl;
-  PIRServer server(enc_params, pir_params, client);
+  PIRServer server(enc_params, pir_params, client.get_public_key(), client);
 
   // Server maps the galois key to client 0. We only have 1 client,
   // which is why we associate it with 0. If there are multiple PIR
@@ -75,49 +76,8 @@ int main(int argc, char *argv[]) {
           "time) ..."
        << endl;
 
-  // *****************************test for fuse filter
-  // vector<pair<uint64_t, vector<uint64_t>>> kvMap(10);
-  // uint64_t valueLength = 20;
-  // seal::Blake2xbPRNGFactory factory;
-  // auto gen = factory.create();
-  // for (uint64_t i = 0; i < 10; i++) {
-  //   kvMap[i].second.resize(valueLength);
-  //   kvMap[i].first = gen->generate();
-  //   for (uint64_t j = 0; j < valueLength; j++) {
-  //     uint8_t val = gen->generate() % enc_params.plain_modulus().value();
-  //     kvMap[i].second[j] = val;
-  //   }
-  // }
-
-  // long_fuse_t lff;
-
-  // if (!long_fuse_allocate(10, valueLength,
-  // enc_params.plain_modulus().value(),
-  //                         &lff)) {
-  //   printf("allocate wrong\n");
-  //   return -1;
-  // }
-
-  // if (!long_fuse_populate(kvMap, 10, valueLength,
-  //                         enc_params.plain_modulus().value(), &lff)) {
-  //   printf("populate wrong\n");
-  //   return -1;
-  // }
-
-  // for (uint64_t i = 0; i < 10; ++i) {
-  //   vector<uint64_t> tmp = long_fuse_decode(kvMap[i].first, &lff);
-  //   for (uint64_t j = 0; j < valueLength; ++j) {
-  //     if (tmp[j] != kvMap[i].second[j]) {
-  //       cout << "i, j: " << i << " " << j << endl;
-  //       cout << "wrong" << endl;
-  //       return -1;
-  //     }
-  //   }
-  // }
-  // *****************************fuse filter test end
-
   // Create test database
-  vector<pair<uint64_t, vector<uint8_t>>> db;
+  vector<pair<uint64_t, uint64_t>> db;
   db.resize(number_of_items);
 
   seal::Blake2xbPRNGFactory factory;
@@ -127,11 +87,15 @@ int main(int argc, char *argv[]) {
     uint32_t low = gen->generate();
     db[i].first = ((uint64_t)high << 32) | (uint64_t)low;
 
-    db[i].second.resize(size_per_item);
-    for (uint64_t j = 0; j < size_per_item; j++) {
-      uint8_t val = gen->generate() % 256;
-      db[i].second[j] = val;
-    }
+    high = gen->generate();
+    low = gen->generate();
+    db[i].second =
+        (((uint64_t)high << 32) | (uint64_t)low) % ((1UL << logt) + 1);
+    // db[i].second.resize(size_per_item);
+    // for (uint64_t j = 0; j < size_per_item; j++) {
+    //   uint8_t val = gen->generate() % 256;
+    //   db[i].second[j] = val;
+    // }
   }
 
   // Measure database setup
@@ -158,7 +122,7 @@ int main(int argc, char *argv[]) {
   for (size_t i = 0; i < number_of_items; ++i) {
     // Measure query generation
     auto time_query_s = high_resolution_clock::now();
-    // PirQuery bf_query = client.generate_bf_query(db[i].first);
+    PirQuery bf_query = client.generate_bf_query(db[i].first);
     PirQuery lff_query = client.generate_lff_query(db[i].first);
     auto time_query_e = high_resolution_clock::now();
     auto time_query_us =
@@ -170,8 +134,10 @@ int main(int argc, char *argv[]) {
     auto time_server_s = high_resolution_clock::now();
     // Answer PIR query from client 0. If there are multiple clients,
     // enter the id of the client (to use the associated galois key).
-    // PirReply bf_reply = server.generate_reply(bf_query, 0, PIRServer::bf_id);
-    PirReply lff_reply = server.generate_reply(lff_query, 0, PIRServer::lff_id);
+    pair<Ciphertext, uint64_t> bf_reply =
+        server.generate_reply(bf_query, 0, PIRServer::bf_id);
+    pair<Ciphertext, uint64_t> lff_reply =
+        server.generate_reply(lff_query, 0, PIRServer::lff_id);
     auto time_server_e = high_resolution_clock::now();
     auto time_server_us =
         duration_cast<microseconds>(time_server_e - time_server_s).count();
@@ -179,8 +145,8 @@ int main(int argc, char *argv[]) {
 
     // Measure response extraction
     auto time_decode_s = chrono::high_resolution_clock::now();
-    // uint64_t bf_elems = client.decode_bf_reply(bf_reply);
-    vector<uint8_t> lff_elems = client.decode_lff_reply(lff_reply);
+    uint64_t bf_elems = client.decode_bf_reply(bf_reply.first);
+    uint64_t lff_elems = client.decode_lff_reply(lff_reply.first);
     // vector<uint8_t> elems = client.decode_reply(reply, offset);
     auto time_decode_e = chrono::high_resolution_clock::now();
     auto time_decode_us =
@@ -195,15 +161,29 @@ int main(int argc, char *argv[]) {
     //   failed = true;
     //   return -1;
     // }
-    assert(lff_elems.size() == size_per_item);
-    for (uint32_t j = 0; j < size_per_item; ++j) {
-      if (lff_elems[j] != db[i].second[j]) {
-        printf("LFF query LFF query result wrong. j: %u\n", j);
-        printf("query result: %d, db_element: %d\n", lff_elems[j],
-               db[i].second[j]);
-        failed = true;
-      }
+    // assert(lff_elems.size() == size_per_item);
+    uint64_t plain_modulus = (1UL << logt) + 1;
+    if (bf_elems != (pir_params.bf_params.optimal_parameters.number_of_hashes +
+                     bf_reply.second) %
+                        plain_modulus) {
+      printf("query result: %lu, db_element: %lu\n", bf_elems,
+             (pir_params.bf_params.optimal_parameters.number_of_hashes +
+              bf_reply.second) %
+                 plain_modulus);
+      failed = true;
     }
+    printf("query result: %lu, db_element: %lu\n", bf_elems,
+           (pir_params.bf_params.optimal_parameters.number_of_hashes +
+            bf_reply.second) %
+               plain_modulus);
+
+    if (lff_elems != (db[i].second + lff_reply.second) % plain_modulus) {
+      printf("query result: %lu, db_element: %lu, %lu\n", lff_elems,
+             db[i].second, (db[i].second + lff_reply.second) % plain_modulus);
+      failed = true;
+    }
+    printf("query result: %lu, db_element: %lu, %lu\n", lff_elems, db[i].second,
+           (db[i].second + lff_reply.second) % plain_modulus);
     if (failed) {
       return -1;
     }

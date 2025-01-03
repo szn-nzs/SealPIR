@@ -3,6 +3,8 @@
 #include "pir.hpp"
 #include <cstdint>
 #include <memory>
+#include <seal/ciphertext.h>
+#include <seal/publickey.h>
 #include <vector>
 
 using namespace std;
@@ -14,6 +16,7 @@ public:
   PIRClient(const seal::EncryptionParameters &encparms,
             const PirParams &pir_params);
   void set_seed(std::vector<std::uint64_t> seed);
+  seal::PublicKey get_public_key();
 
   // PirQuery generate_query(std::uint64_t desiredIndex);
   PirQuery generate_bf_query(uint64_t desiredKey);
@@ -22,7 +25,7 @@ public:
   // written
   int generate_serialized_query(std::uint64_t desiredIndex,
                                 std::stringstream &stream);
-  seal::Plaintext decode_reply(PirReply &reply, uint8_t db_id);
+  seal::Plaintext decode_reply(const seal::Ciphertext &reply, uint8_t db_id);
 
   std::vector<uint64_t> extract_coeffs(seal::Plaintext pt);
   std::vector<uint64_t> extract_coeffs(seal::Plaintext pt,
@@ -30,8 +33,10 @@ public:
   uint64_t extract_bf_bytes(seal::Plaintext pt);
   std::vector<uint8_t> extract_lff_bytes(seal::Plaintext pt);
 
-  uint64_t decode_bf_reply(PirReply &replyt);
-  std::vector<uint8_t> decode_lff_reply(PirReply &reply);
+  uint64_t decode_bf_reply(const seal::Ciphertext &replyt);
+
+  // std::vector<uint8_t> decode_lff_reply(const seal::Ciphertext &reply);
+  uint64_t decode_lff_reply(const seal::Ciphertext &reply);
 
   seal::Plaintext decrypt(seal::Ciphertext ct) const;
 
@@ -52,6 +57,7 @@ private:
   seal::EncryptionParameters enc_params_;
   PirParams pir_params_; // PIR parameters
 
+  seal::PublicKey public_key_;
   std::unique_ptr<seal::Encryptor> encryptor_;
   std::unique_ptr<seal::Decryptor> decryptor_;
   std::unique_ptr<seal::Evaluator> evaluator_;

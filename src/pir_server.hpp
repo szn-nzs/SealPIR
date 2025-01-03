@@ -5,6 +5,8 @@
 #include <cstdint>
 #include <map>
 #include <memory>
+#include <seal/ciphertext.h>
+#include <seal/publickey.h>
 #include <utility>
 #include <vector>
 
@@ -12,12 +14,14 @@ class PIRServer {
 public:
   const static std::uint8_t bf_id = 0;
   const static std::uint8_t lff_id = 1;
-  using DBType = std::vector<std::pair<uint64_t, std::vector<uint8_t>>>;
+  using DBType = std::vector<std::pair<uint64_t, uint64_t>>;
+  // using DBType = std::vector<std::pair<uint64_t, std::vector<uint8_t>>>;
   using KVMapType = std::vector<std::pair<uint64_t, std::vector<uint64_t>>>;
   // using DBType =
   //     std::vector<std::pair<std::vector<uint8_t>, std::vector<uint8_t>>>;
   PIRServer(const seal::EncryptionParameters &enc_params,
-            const PirParams &pir_params, const PIRClient &client);
+            const PirParams &pir_params, const seal::PublicKey &public_key,
+            const PIRClient &client);
 
   // NOTE: server takes over ownership of db and frees it when it exits.
   // Caller cannot free db
@@ -35,8 +39,8 @@ public:
                                              std::uint32_t client_id);
 
   PirQuery deserialize_query(std::stringstream &stream);
-  PirReply generate_reply(PirQuery &query, std::uint32_t client_id,
-                          std::uint8_t db_id);
+  std::pair<seal::Ciphertext, std::uint64_t>
+  generate_reply(PirQuery &query, std::uint32_t client_id, std::uint8_t db_id);
   // Serializes the reply into the provided stream and returns the number of
   // bytes written
   int serialize_reply(PirReply &reply, std::stringstream &stream);
@@ -58,6 +62,7 @@ private:
   bool is_db_preprocessed_;
   std::map<int, seal::GaloisKeys> galoisKeys_;
   std::unique_ptr<seal::Evaluator> evaluator_;
+  std::unique_ptr<seal::Encryptor> encryptor_;
   // std::unique_ptr<seal::BatchEncoder> encoder_;
   std::shared_ptr<seal::SEALContext> context_;
 

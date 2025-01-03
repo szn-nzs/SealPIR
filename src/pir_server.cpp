@@ -21,11 +21,13 @@ using namespace seal;
 using namespace seal::util;
 
 PIRServer::PIRServer(const EncryptionParameters &enc_params,
-                     const PirParams &pir_params, const PIRClient &client)
+                     const PirParams &pir_params,
+                     const seal::PublicKey &public_key, const PIRClient &client)
     : client_(client), enc_params_(enc_params), pir_params_(pir_params),
       is_db_preprocessed_(false) {
   context_ = make_shared<SEALContext>(enc_params, true);
   evaluator_ = make_unique<Evaluator>(*context_);
+  encryptor_ = make_unique<Encryptor>(*context_, public_key);
 }
 
 void PIRServer::preprocess_database() {
@@ -78,48 +80,85 @@ vector<uint64_t> PIRServer::set_database(const DBType &db_vec, uint64_t ele_num,
   /*********************************************************************
   encode bloom filter
   *********************************************************************/
+  uint64_t bf_filter_num = 1;
+  for (uint32_t i = 1; i < pir_params_.bf_d; i++) {
+    bf_filter_num *= pir_params_.bf_nvec[i];
+  }
   bloom_parameters bf_params = pir_params_.bf_params;
   uint64_t bf_number_of_hashes = bf_params.optimal_parameters.number_of_hashes;
 
-  bloom_filter bf(bf_params);
-  for (uint64_t i = 0; i < ele_num; ++i) {
-    bf.insert(db_vec[i].first);
+  vector<bloom_filter> bf;
+  bf.reserve(bf_filter_num);
+  for (uint64_t i = 0; i < bf_filter_num; ++i) {
+    bloom_filter tmp_bf(bf_params);
+    bf.emplace_back(std::move(tmp_bf));
   }
 
-  uint64_t bf_num_of_plaintexts =
-      pir_params_.bf_params.optimal_parameters.table_size;
-  // assert(num_of_plaintexts == bf_params.optimal_parameters.table_size);
-  printf("bf_prod: %lu, num_of_ptxt: %lu\n", bf_prod, bf_num_of_plaintexts);
-  assert(bf_num_of_plaintexts <= bf_prod);
+  /***************
+  generate sub vectors
+  ***************/
+  vector<vector<uint64_t>> bf_sub_vectors(bf_filter_num);
+  for (uint64_t i = 0; i < bf_filter_num; ++i) {
+    bf_sub_vectors[i].reserve(pir_params_.max_bf_filter_size);
+  }
+
+  seal::Blake2xbPRNGFactory factory;
+  auto gen = factory.create();
+  uint32_t bf_partition_seed;
+  bool isContinue = true;
+  while (isContinue) {
+    bf_partition_seed = gen->generate();
+    for (uint64_t i = 0; i < ele_num; ++i) {
+      uint32_t filter_idx =
+          murmurhash(reinterpret_cast<const char *>(&db_vec[i].first),
+                     sizeof(db_vec[i].first), bf_partition_seed);
+      filter_idx %= bf_filter_num;
+
+      bf_sub_vectors[filter_idx].emplace_back(db_vec[i].first);
+    }
+
+    isContinue = false;
+    for (uint64_t i = 0; i < bf_filter_num; ++i) {
+      if (bf_sub_vectors[i].size() > pir_params_.max_bf_filter_size) {
+        isContinue = true;
+        break;
+      }
+    }
+  }
+
+  for (uint64_t i = 0; i < bf_filter_num; ++i) {
+    for (uint64_t j = 0; j < bf_sub_vectors[i].size(); ++j) {
+      bf[i].insert(bf_sub_vectors[i][j]);
+    }
+  }
+
   auto bf_result = make_unique<vector<Plaintext>>();
   bf_result->reserve(bf_prod);
 
-  cout << "Elements per plaintext: " << ele_per_ptxt << endl;
-  // cout << "Coeff per ptxt: " << coeff_per_ptxt << endl;
-  cout << "Bytes per plaintext: " << bytes_per_ptxt << endl;
-  cout << "Num of plaintexts: " << bf_num_of_plaintexts << endl;
+  /***************
+  encode bf database
+  ***************/
 
-  for (uint64_t i = 0; i < bf_num_of_plaintexts; ++i) {
-    vector<uint64_t> coefficients;
-    coefficients.reserve(N);
+  for (uint64_t i = 0; i < bf_params.optimal_parameters.table_size; ++i) {
+    for (uint64_t filter_idx = 0; filter_idx < bf_filter_num; ++filter_idx) {
+      vector<uint64_t> coefficients;
+      coefficients.reserve(N);
 
-    uint8_t tmp_bit = bf.get_bit_at(i);
-    coefficients.push_back((uint64_t)tmp_bit);
-    for (uint64_t j = 1; j < N; ++j) {
-      coefficients.push_back(1);
+      uint8_t tmp_bit = bf[filter_idx].get_bit_at(i);
+      coefficients.emplace_back((uint64_t)tmp_bit);
+      for (uint64_t j = 1; j < N; ++j) {
+        coefficients.emplace_back(1);
+      }
+
+      Plaintext plain(N);
+      vector_to_plaintext(coefficients, plain);
+      bf_result->emplace_back(std::move(plain));
     }
-
-    Plaintext plain(N);
-    vector_to_plaintext(coefficients, plain);
-    // for (uint64_t j = 0; j < N; ++j) {
-    //   plain[j] = coefficients[j];
-    // }
-    bf_result->emplace_back(std::move(plain));
   }
 
   // Add padding to make database a matrix
   uint64_t bf_current_plaintexts = bf_result->size();
-  assert(bf_current_plaintexts <= bf_num_of_plaintexts);
+  // assert(bf_current_plaintexts <= bf_num_of_plaintexts);
 
 #ifdef DEBUG
   cout << "adding: " << matrix_plaintexts - current_plaintexts
@@ -159,10 +198,10 @@ vector<uint64_t> PIRServer::set_database(const DBType &db_vec, uint64_t ele_num,
   uint64_t lff_value_long_length = lff_params.ValueLongLength;
   assert(lff_value_long_length <= N);
 
-  seal::Blake2xbPRNGFactory factory;
-  auto gen = factory.create();
+  // seal::Blake2xbPRNGFactory factory;
+  // auto gen = factory.create();
   uint32_t lff_partition_seed;
-  bool isContinue = true;
+  isContinue = true;
   while (isContinue) {
     lff_partition_seed = gen->generate();
     for (uint64_t i = 0; i < ele_num; ++i) {
@@ -171,10 +210,12 @@ vector<uint64_t> PIRServer::set_database(const DBType &db_vec, uint64_t ele_num,
                      sizeof(db_vec[i].first), lff_partition_seed);
       filter_idx %= lff_filter_num;
 
-      vector<uint64_t> coeffs =
-          bytes_to_coeffs(logt, db_vec[i].second.data(), ele_size);
+      // vector<uint64_t> coeffs =
+      //     bytes_to_coeffs(logt, db_vec[i].second.data(), ele_size);
+      // pair<uint64_t, vector<uint64_t>> kv_pair =
+      //     make_pair(db_vec[i].first, std::move(coeffs));
       pair<uint64_t, vector<uint64_t>> kv_pair =
-          make_pair(db_vec[i].first, std::move(coeffs));
+          make_pair(db_vec[i].first, vector<uint64_t>(1, db_vec[i].second));
       lff_sub_kv_maps[filter_idx].emplace_back(std::move(kv_pair));
     }
 
@@ -195,6 +236,9 @@ vector<uint64_t> PIRServer::set_database(const DBType &db_vec, uint64_t ele_num,
                               enc_params_.plain_modulus().value(), &lff[i]));
   }
 
+  /***************
+  encode lff database
+  ***************/
   auto lff_result = make_unique<vector<Plaintext>>();
   lff_result->reserve(lff_prod);
   for (uint64_t i = 0; i < lff_params.ArrayLength; ++i) {
@@ -232,10 +276,11 @@ vector<uint64_t> PIRServer::set_database(const DBType &db_vec, uint64_t ele_num,
 
   set_database(std::move(bf_result), std::move(lff_result));
 
-  vector<uint64_t> seed_vec(lff_filter_num + 1);
-  seed_vec[0] = lff_partition_seed;
+  vector<uint64_t> seed_vec(lff_filter_num + 2);
+  seed_vec[0] = bf_partition_seed;
+  seed_vec[1] = lff_partition_seed;
   for (uint64_t i = 0; i < lff_filter_num; ++i) {
-    seed_vec[i + 1] = lff[i].Seed;
+    seed_vec[i + 2] = lff[i].Seed;
   }
   return seed_vec;
 }
@@ -276,8 +321,8 @@ int PIRServer::serialize_reply(PirReply &reply, stringstream &stream) {
   return output_size;
 }
 
-PirReply PIRServer::generate_reply(PirQuery &query, uint32_t client_id,
-                                   uint8_t db_id) {
+pair<Ciphertext, uint64_t>
+PIRServer::generate_reply(PirQuery &query, uint32_t client_id, uint8_t db_id) {
   vector<uint64_t> nvec;
   vector<Plaintext> *cur;
   if (db_id == bf_id) {
@@ -393,7 +438,22 @@ PirReply PIRServer::generate_reply(PirQuery &query, uint32_t client_id,
 
     if (i == nvec.size() - 1) {
       assert(intermediateCtxts.size() == 1);
-      return intermediateCtxts;
+
+      seal::Blake2xbPRNGFactory factory;
+      auto gen = factory.create();
+      uint64_t mask = gen->generate() % enc_params_.plain_modulus().value();
+      printf("mask: %lu\n", mask);
+      // uint64_t mask = gen->generate() % enc_params_.plain_modulus().value();
+
+      Plaintext mask_plain(N);
+      mask_plain.set_zero();
+      mask_plain[0] = mask;
+      Ciphertext mask_cipher;
+      encryptor_->encrypt(mask_plain, mask_cipher);
+
+      evaluator_->add(intermediateCtxts[0], mask_cipher, mask_cipher);
+      // evaluator_->multiply(mask_cipher, intermediateCtxts[0], mask_cipher);
+      return make_pair(mask_cipher, mask);
     } else {
       intermediate_cipher.clear();
       intermediate_cipher.reserve(product);
@@ -433,7 +493,7 @@ PirReply PIRServer::generate_reply(PirQuery &query, uint32_t client_id,
   // This should never get here
   assert(0);
   vector<Ciphertext> fail(1);
-  return fail;
+  return make_pair(fail[0], 0UL);
 }
 
 inline vector<Ciphertext> PIRServer::expand_query(const Ciphertext &encrypted,

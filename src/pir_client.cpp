@@ -7,7 +7,9 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <seal/ciphertext.h>
 #include <seal/plaintext.h>
+#include <seal/publickey.h>
 #include <vector>
 
 using namespace std;
@@ -22,14 +24,14 @@ PIRClient::PIRClient(const EncryptionParameters &enc_params,
 
   keygen_ = make_unique<KeyGenerator>(*context_);
 
-  PublicKey public_key;
-  keygen_->create_public_key(public_key);
+  // PublicKey public_key;
+  keygen_->create_public_key(public_key_);
   SecretKey secret_key = keygen_->secret_key();
 
   if (pir_params_.enable_symmetric) {
     encryptor_ = make_unique<Encryptor>(*context_, secret_key);
   } else {
-    encryptor_ = make_unique<Encryptor>(*context_, public_key);
+    encryptor_ = make_unique<Encryptor>(*context_, public_key_);
   }
 
   decryptor_ = make_unique<Decryptor>(*context_, secret_key);
@@ -40,6 +42,8 @@ PIRClient::PIRClient(const EncryptionParameters &enc_params,
 }
 
 void PIRClient::set_seed(vector<uint64_t> seed) { seed_ = std::move(seed); }
+
+PublicKey PIRClient::get_public_key() { return public_key_; }
 
 // int PIRClient::generate_serialized_query(uint64_t desiredIndex,
 //                                          std::stringstream &stream) {
@@ -84,41 +88,47 @@ void PIRClient::set_seed(vector<uint64_t> seed) { seed_ = std::move(seed); }
 //   return output_size;
 // }
 
-// PirQuery PIRClient::generate_query(uint64_t desiredIndex) {
-
 PirQuery PIRClient::generate_bf_query(uint64_t desiredKey) {
+  uint64_t N = enc_params_.poly_modulus_degree();
+  uint64_t bf_filter_num = 1;
+  vector<uint64_t> tmp_nvec(pir_params_.bf_d - 1);
+  for (uint32_t i = 1; i < pir_params_.bf_d; i++) {
+    bf_filter_num *= pir_params_.bf_nvec[i];
+    tmp_nvec[i - 1] = pir_params_.bf_nvec[i];
+  }
+
+  uint64_t bf_partition_seed = seed_[0];
+  uint32_t filter_idx = murmurhash(reinterpret_cast<const char *>(&desiredKey),
+                                   sizeof(desiredKey), bf_partition_seed);
+  filter_idx %= bf_filter_num;
+
   bloom_parameters bf_params = pir_params_.bf_params;
   bloom_filter bf(bf_params);
   // bfIndices.first就是对应明文的序号
   vector<pair<uint64_t, uint64_t>> bfIndices = bf.get_indices(desiredKey);
+  uint64_t bf_hash_num = bf_params.optimal_parameters.number_of_hashes;
 
   vector<vector<uint64_t>> indices;
-  indices.resize(bfIndices.size());
-  for (size_t i = 0; i < bf_params.optimal_parameters.number_of_hashes; ++i) {
-    uint64_t desiredIndex = get_fv_index(bfIndices[i].first);
-    assert(desiredIndex == bfIndices[i].first);
-    indices[i] = compute_indices(desiredIndex, pir_params_.bf_nvec);
-    assert(indices[i].size() == 1);
-    assert(desiredIndex == indices[i][0]);
+  indices.resize(pir_params_.bf_d);
+  indices[0].resize(bf_hash_num);
+  for (uint64_t i = 0; i < bf_hash_num; ++i) {
+    indices[0][i] = bfIndices[i].first;
+  }
+  vector<uint64_t> tmp_indices = compute_indices(filter_idx, tmp_nvec);
+  for (uint64_t i = 1; i < pir_params_.bf_d; ++i) {
+    indices[i].push_back(tmp_indices[i - 1]);
   }
 
   PirQuery result(pir_params_.bf_d);
-  int N = enc_params_.poly_modulus_degree();
-
-  // 处理每个维度
   for (uint32_t i = 0; i < pir_params_.bf_d; i++) {
-    Plaintext pt(enc_params_.poly_modulus_degree());
+    Plaintext pt(N);
 
     // 如果当前维度的明文数大于N，也就是一个明文放不下当前维度的query
     // 需要num_ptxts个明文
     uint64_t n_i = pir_params_.bf_nvec[i];
+    printf("i: %u, ni: %lu\n", i, n_i);
     uint32_t num_ptxts = ceil((n_i + 0.0) / N);
 
-    // initialize result.
-    // cout << "Client: index " << i + 1 << "/ " << indices_[hash_idx].size()
-    //      << " = " << indices_[hash_idx][i] << endl;
-    // cout << "Client: number of ctxts needed for query = " << num_ptxts <<
-    // endl;
     for (uint32_t j = 0; j < num_ptxts; j++) {
       pt.set_zero();
 
@@ -129,11 +139,10 @@ PirQuery PIRClient::generate_bf_query(uint64_t desiredKey) {
       uint64_t log_total = ceil(log2(total));
 
       // 处理h_i(x)
-      for (uint32_t hash_idx = 0; hash_idx < indices.size(); ++hash_idx) {
+      for (uint32_t idx = 0; idx < indices[i].size(); ++idx) {
         // *****************************************似乎是下面这两行报过数组越界？
-        if (indices[hash_idx][i] >= N * j &&
-            indices[hash_idx][i] <= N * (j + 1)) {
-          uint64_t real_index = indices[hash_idx][i] - N * j;
+        if (indices[i][idx] >= N * j && indices[i][idx] <= N * (j + 1)) {
+          uint64_t real_index = indices[i][idx] - N * j;
 
           cout << "Client: Inverting " << pow(2, log_total) << endl;
           pt[real_index] =
@@ -162,7 +171,7 @@ PirQuery PIRClient::generate_lff_query(uint64_t desiredKey) {
     tmp_nvec[i - 1] = pir_params_.lff_nvec[i];
   }
 
-  uint64_t lff_partition_seed = seed_[0];
+  uint64_t lff_partition_seed = seed_[1];
   uint32_t filter_idx = murmurhash(reinterpret_cast<const char *>(&desiredKey),
                                    sizeof(desiredKey), lff_partition_seed);
   filter_idx %= lff_filter_num;
@@ -186,7 +195,7 @@ PirQuery PIRClient::generate_lff_query(uint64_t desiredKey) {
   }
 
   PirQuery result(pir_params_.lff_d);
-  int N = enc_params_.poly_modulus_degree();
+  uint64_t N = enc_params_.poly_modulus_degree();
 
   // 处理每个维度
   for (uint32_t i = 0; i < pir_params_.lff_d; i++) {
@@ -247,14 +256,17 @@ Plaintext PIRClient::decrypt(Ciphertext ct) const {
   return pt;
 }
 
-uint64_t PIRClient::decode_bf_reply(PirReply &reply) {
+uint64_t PIRClient::decode_bf_reply(const Ciphertext &reply) {
+  // uint64_t PIRClient::decode_bf_reply(PirReply &reply) {
   Plaintext result = decode_reply(reply, bf_id);
-  return extract_bf_bytes(result);
+  return result[0];
+  // return extract_bf_bytes(result);
 }
 
-vector<uint8_t> PIRClient::decode_lff_reply(PirReply &reply) {
+uint64_t PIRClient::decode_lff_reply(const Ciphertext &reply) {
   Plaintext result = decode_reply(reply, lff_id);
-  return extract_lff_bytes(result);
+  return result[0];
+  // return extract_lff_bytes(result);
 }
 
 // vector<uint64_t> PIRClient::extract_coeffs(Plaintext pt) {
@@ -310,10 +322,9 @@ std::vector<uint8_t> PIRClient::extract_lff_bytes(seal::Plaintext pt) {
   return elems;
 }
 
-Plaintext PIRClient::decode_reply(PirReply &reply, uint8_t db_id) {
-  assert(reply.size() == 1);
+Plaintext PIRClient::decode_reply(const Ciphertext &reply, uint8_t db_id) {
   Plaintext res;
-  decryptor_->decrypt(reply[0], res);
+  decryptor_->decrypt(reply, res);
   return res;
 }
 
