@@ -1,6 +1,7 @@
 #include "pir_client.hpp"
 #include "long_fuse_filter.hpp"
 #include "murmur_hash.hpp"
+#include "ot/myROT.hpp"
 #include "pir.hpp"
 #include <algorithm>
 #include <cassert>
@@ -10,15 +11,23 @@
 #include <seal/ciphertext.h>
 #include <seal/plaintext.h>
 #include <seal/publickey.h>
+#include <utility>
 #include <vector>
 
 using namespace std;
 using namespace seal;
 using namespace seal::util;
 
+namespace lpr21::sealpir {
 PIRClient::PIRClient(const EncryptionParameters &enc_params,
-                     const PirParams &pir_params)
-    : enc_params_(enc_params), pir_params_(pir_params) {
+                     const PirParams &pir_params,
+                     std::shared_ptr<ot::myIKNPSender> iknp_sender,
+                     std::shared_ptr<ot::myIKNPReceiver> iknp_receiver)
+    : enc_params_(enc_params), pir_params_(pir_params), sender_(iknp_sender),
+      receiver_(iknp_receiver),
+      not_receiver_(
+          iknp_receiver,
+          pir_params.bf_params.optimal_parameters.number_of_hashes + 1, 1) {
 
   context_ = make_shared<SEALContext>(enc_params, true);
 
@@ -44,6 +53,8 @@ PIRClient::PIRClient(const EncryptionParameters &enc_params,
 void PIRClient::set_seed(vector<uint64_t> seed) { seed_ = std::move(seed); }
 
 PublicKey PIRClient::get_public_key() { return public_key_; }
+
+uint64_t PIRClient::get_weight() { return w_; }
 
 // int PIRClient::generate_serialized_query(uint64_t desiredIndex,
 //                                          std::stringstream &stream) {
@@ -145,8 +156,9 @@ PirQuery PIRClient::generate_bf_query(uint64_t desiredKey) {
           uint64_t real_index = indices[i][idx] - N * j;
 
           cout << "Client: Inverting " << pow(2, log_total) << endl;
-          pt[real_index] =
+          pt[real_index] +=
               invert_mod(pow(2, log_total), enc_params_.plain_modulus());
+          pt[real_index] %= enc_params_.plain_modulus().value();
         }
       }
 
@@ -161,6 +173,26 @@ PirQuery PIRClient::generate_bf_query(uint64_t desiredKey) {
   }
 
   return result;
+}
+pair<Ciphertext, PirQuery>
+PIRClient::generate_lff_query_and_weight(uint64_t desiredKey) {
+  std::random_device rd;
+  std::mt19937_64 gen(rd());
+  w_ = gen() % enc_params_.plain_modulus().value();
+
+  Plaintext pt(enc_params_.poly_modulus_degree());
+  pt.set_zero();
+  pt[0] = w_;
+  Ciphertext ct;
+  if (pir_params_.enable_symmetric) {
+    encryptor_->encrypt_symmetric(pt, ct);
+  } else {
+    encryptor_->encrypt(pt, ct);
+  }
+
+  PirQuery query = generate_lff_query(desiredKey);
+  auto res = make_pair(ct, query);
+  return res;
 }
 
 PirQuery PIRClient::generate_lff_query(uint64_t desiredKey) {
@@ -177,10 +209,9 @@ PirQuery PIRClient::generate_lff_query(uint64_t desiredKey) {
   filter_idx %= lff_filter_num;
 
   long_fuse_params params = pir_params_.lff_params;
-  uint64_t hash = long_fuse_mix_split(desiredKey, seed_[filter_idx + 1]);
+  uint64_t hash = long_fuse_mix_split(desiredKey, seed_[filter_idx + 2]);
   long_hashes_t hashes = long_fuse_hash_batch(hash, params);
   vector<uint64_t> lff_indices({hashes.h0, hashes.h1, hashes.h2});
-  // printf("h0: %u, h1: %u, h2: %u\n", hashes.h0, hashes.h1, hashes.h2);
   assert(lff_indices.size() == lff_hash_num);
 
   vector<vector<uint64_t>> indices;
@@ -260,35 +291,12 @@ uint64_t PIRClient::decode_bf_reply(const Ciphertext &reply) {
   // uint64_t PIRClient::decode_bf_reply(PirReply &reply) {
   Plaintext result = decode_reply(reply, bf_id);
   return result[0];
-  // return extract_bf_bytes(result);
 }
 
 uint64_t PIRClient::decode_lff_reply(const Ciphertext &reply) {
   Plaintext result = decode_reply(reply, lff_id);
   return result[0];
-  // return extract_lff_bytes(result);
 }
-
-// vector<uint64_t> PIRClient::extract_coeffs(Plaintext pt) {
-//   vector<uint64_t> coeffs;
-//   encoder_->decode(pt, coeffs);
-//   return coeffs;
-// }
-
-// std::vector<uint64_t> PIRClient::extract_coeffs(seal::Plaintext pt,
-//                                                 uint64_t offset) {
-//   vector<uint64_t> coeffs;
-//   encoder_->decode(pt, coeffs);
-
-//   uint32_t logt = floor(log2(enc_params_.plain_modulus().value()));
-
-//   uint64_t coeffs_per_element =
-//       coefficients_per_element(logt, pir_params_.ele_size);
-
-//   return std::vector<uint64_t>(coeffs.begin() + offset * coeffs_per_element,
-//                                coeffs.begin() +
-//                                    (offset + 1) * coeffs_per_element);
-// }
 
 uint64_t PIRClient::extract_bf_bytes(seal::Plaintext pt) {
   uint32_t N = enc_params_.poly_modulus_degree();
@@ -307,99 +315,11 @@ uint64_t PIRClient::extract_bf_bytes(seal::Plaintext pt) {
   return coeffs[0];
 }
 
-std::vector<uint8_t> PIRClient::extract_lff_bytes(seal::Plaintext pt) {
-  uint32_t N = enc_params_.poly_modulus_degree();
-  uint32_t logt = floor(log2(enc_params_.plain_modulus().value()));
-
-  // Convert from FV plaintext (polynomial) to database element at the client
-  vector<uint8_t> elems(pir_params_.ele_size);
-  vector<uint64_t> coeffs(N);
-  for (uint64_t i = 0; i < N; ++i) {
-    coeffs[i] = pt[i];
-  }
-  coeffs_to_bytes(logt, coeffs, elems.data(), pir_params_.ele_size,
-                  pir_params_.ele_size);
-  return elems;
-}
-
 Plaintext PIRClient::decode_reply(const Ciphertext &reply, uint8_t db_id) {
   Plaintext res;
   decryptor_->decrypt(reply, res);
   return res;
 }
-
-// Plaintext PIRClient::decode_reply(PirReply &reply, uint8_t db_id) {
-//   EncryptionParameters parms;
-//   parms_id_type parms_id;
-//   if (pir_params_.enable_mswitching) {
-//     parms = context_->last_context_data()->parms();
-//     parms_id = context_->last_parms_id();
-//   } else {
-//     parms = context_->first_context_data()->parms();
-//     parms_id = context_->first_parms_id();
-//   }
-//   uint32_t exp_ratio = compute_expansion_ratio(parms);
-//   uint32_t recursion_level;
-//   if (db_id == bf_id) {
-//     recursion_level = pir_params_.bf_d;
-//   } else {
-//     recursion_level = pir_params_.lff_d;
-//   }
-
-//   vector<Ciphertext> temp = reply;
-//   uint32_t ciphertext_size = temp[0].size();
-
-//   uint64_t t = enc_params_.plain_modulus().value();
-
-//   for (uint32_t i = 0; i < recursion_level; i++) {
-//     cout << "Client: " << i + 1 << "/ " << recursion_level
-//          << "-th decryption layer started." << endl;
-//     vector<Ciphertext> newtemp;
-//     vector<Plaintext> tempplain;
-
-//     for (uint32_t j = 0; j < temp.size(); j++) {
-//       Plaintext ptxt;
-//       decryptor_->decrypt(temp[j], ptxt);
-// #ifdef DEBUG
-//       cout << "Client: reply noise budget = "
-//            << decryptor_->invariant_noise_budget(temp[j]) << endl;
-// #endif
-
-//       // cout << "decoded (and scaled) plaintext = " << ptxt.to_string() <<
-//       // endl;
-//       tempplain.push_back(ptxt);
-
-// #ifdef DEBUG
-//       cout << "recursion level : " << i << " noise budget :  ";
-//       cout << decryptor_->invariant_noise_budget(temp[j]) << endl;
-// #endif
-
-//       if ((j + 1) % (exp_ratio * ciphertext_size) == 0 && j > 0) {
-//         // Combine into one ciphertext.
-//         Ciphertext combined(*context_, parms_id);
-//         compose_to_ciphertext(parms, tempplain, combined);
-//         newtemp.push_back(combined);
-//         tempplain.clear();
-//         // cout << "Client: const term of ciphertext = " << combined[0] <<
-//         endl;
-//       }
-//     }
-//     cout << "Client: done." << endl;
-//     cout << endl;
-//     if (i == recursion_level - 1) {
-//       assert(temp.size() == 1);
-//       return tempplain[0];
-//     } else {
-//       tempplain.clear();
-//       temp = newtemp;
-//     }
-//   }
-
-//   // This should never be called
-//   assert(0);
-//   Plaintext fail;
-//   return fail;
-// }
 
 GaloisKeys PIRClient::generate_galois_keys() {
   // Generate the Galois keys needed for coeff_select.
@@ -419,36 +339,4 @@ GaloisKeys PIRClient::generate_galois_keys() {
   keygen_->create_galois_keys(galois_elts, gal_keys);
   return gal_keys;
 }
-
-// Plaintext PIRClient::replace_element(Plaintext pt, vector<uint64_t>
-// new_element,
-//                                      uint64_t offset) {
-//   vector<uint64_t> coeffs = extract_coeffs(pt);
-
-//   uint32_t logt = floor(log2(enc_params_.plain_modulus().value()));
-//   uint64_t coeffs_per_element =
-//       coefficients_per_element(logt, pir_params_.ele_size);
-
-//   assert(new_element.size() == coeffs_per_element);
-
-//   for (uint64_t i = 0; i < coeffs_per_element; i++) {
-//     coeffs[i + offset * coeffs_per_element] = new_element[i];
-//   }
-
-//   Plaintext new_pt;
-
-//   for (uint64_t i = 0; i < )
-//   encoder_->encode(coeffs, new_pt);
-//   return new_pt;
-// }
-
-Ciphertext PIRClient::get_one() {
-  Plaintext pt("1");
-  Ciphertext ct;
-  if (pir_params_.enable_symmetric) {
-    encryptor_->encrypt_symmetric(pt, ct);
-  } else {
-    encryptor_->encrypt(pt, ct);
-  }
-  return ct;
-}
+} // namespace lpr21::sealpir

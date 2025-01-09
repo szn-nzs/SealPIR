@@ -2,6 +2,7 @@
 #include "bloom_filter.hpp"
 #include "long_fuse_filter.hpp"
 #include "murmur_hash.hpp"
+#include "ot/myROT.hpp"
 #include "pir.hpp"
 #include "pir_client.hpp"
 #include <algorithm>
@@ -20,11 +21,18 @@ using namespace std;
 using namespace seal;
 using namespace seal::util;
 
+namespace lpr21::sealpir {
 PIRServer::PIRServer(const EncryptionParameters &enc_params,
                      const PirParams &pir_params,
-                     const seal::PublicKey &public_key, const PIRClient &client)
+                     const seal::PublicKey &public_key, const PIRClient &client,
+                     std::shared_ptr<ot::myIKNPSender> iknp_sender,
+                     std::shared_ptr<ot::myIKNPReceiver> iknp_receiver)
     : client_(client), enc_params_(enc_params), pir_params_(pir_params),
-      is_db_preprocessed_(false) {
+      is_db_preprocessed_(false), sender_(iknp_sender),
+      receiver_(iknp_receiver),
+      not_sender_(iknp_sender,
+                  pir_params.bf_params.optimal_parameters.number_of_hashes + 1,
+                  1) {
   context_ = make_shared<SEALContext>(enc_params, true);
   evaluator_ = make_unique<Evaluator>(*context_);
   encryptor_ = make_unique<Encryptor>(*context_, public_key);
@@ -106,7 +114,9 @@ vector<uint64_t> PIRServer::set_database(const DBType &db_vec, uint64_t ele_num,
   auto gen = factory.create();
   uint32_t bf_partition_seed;
   bool isContinue = true;
-  while (isContinue) {
+  uint64_t repeat = 0;
+  while (isContinue && repeat < 10000) {
+    repeat++;
     bf_partition_seed = gen->generate();
     for (uint64_t i = 0; i < ele_num; ++i) {
       uint32_t filter_idx =
@@ -124,6 +134,10 @@ vector<uint64_t> PIRServer::set_database(const DBType &db_vec, uint64_t ele_num,
         break;
       }
     }
+  }
+  if (repeat >= 10000) {
+    printf("encode bloom filter error\n");
+    assert(0);
   }
 
   for (uint64_t i = 0; i < bf_filter_num; ++i) {
@@ -158,7 +172,6 @@ vector<uint64_t> PIRServer::set_database(const DBType &db_vec, uint64_t ele_num,
 
   // Add padding to make database a matrix
   uint64_t bf_current_plaintexts = bf_result->size();
-  // assert(bf_current_plaintexts <= bf_num_of_plaintexts);
 
 #ifdef DEBUG
   cout << "adding: " << matrix_plaintexts - current_plaintexts
@@ -198,11 +211,11 @@ vector<uint64_t> PIRServer::set_database(const DBType &db_vec, uint64_t ele_num,
   uint64_t lff_value_long_length = lff_params.ValueLongLength;
   assert(lff_value_long_length <= N);
 
-  // seal::Blake2xbPRNGFactory factory;
-  // auto gen = factory.create();
   uint32_t lff_partition_seed;
   isContinue = true;
-  while (isContinue) {
+  repeat = 0;
+  while (isContinue && repeat < 10000) {
+    repeat++;
     lff_partition_seed = gen->generate();
     for (uint64_t i = 0; i < ele_num; ++i) {
       uint32_t filter_idx =
@@ -210,24 +223,22 @@ vector<uint64_t> PIRServer::set_database(const DBType &db_vec, uint64_t ele_num,
                      sizeof(db_vec[i].first), lff_partition_seed);
       filter_idx %= lff_filter_num;
 
-      // vector<uint64_t> coeffs =
-      //     bytes_to_coeffs(logt, db_vec[i].second.data(), ele_size);
-      // pair<uint64_t, vector<uint64_t>> kv_pair =
-      //     make_pair(db_vec[i].first, std::move(coeffs));
       pair<uint64_t, vector<uint64_t>> kv_pair =
           make_pair(db_vec[i].first, vector<uint64_t>(1, db_vec[i].second));
       lff_sub_kv_maps[filter_idx].emplace_back(std::move(kv_pair));
     }
 
     isContinue = false;
-    // printf("max length: %lu\n", pir_params_.max_lff_filter_size);
     for (uint64_t i = 0; i < lff_filter_num; ++i) {
-      // printf("i: %lu, sub map length: %lu\n", i, lff_sub_kv_maps[i].size());
       if (lff_sub_kv_maps[i].size() > pir_params_.max_lff_filter_size) {
         isContinue = true;
         break;
       }
     }
+  }
+  if (repeat >= 10000) {
+    printf("encode fuse filter error\n");
+    assert(0);
   }
 
   for (uint64_t i = 0; i < lff_filter_num; ++i) {
@@ -289,29 +300,6 @@ void PIRServer::set_galois_key(uint32_t client_id, seal::GaloisKeys galkey) {
   galoisKeys_[client_id] = galkey;
 }
 
-// PirQuery PIRServer::deserialize_query(stringstream &stream) {
-//   PirQuery q;
-
-//   for (uint32_t i = 0; i < pir_params_.d; i++) {
-//     // number of ciphertexts needed to encode the index for dimension i
-//     // keeping into account that each ciphertext can encode up to
-//     // poly_modulus_degree indexes In most cases this is usually 1.
-//     uint32_t ctx_per_dimension = ceil((pir_params_.bf_nvec[i] + 0.0) /
-//                                       enc_params_.poly_modulus_degree());
-
-//     vector<Ciphertext> cs;
-//     for (uint32_t j = 0; j < ctx_per_dimension; j++) {
-//       Ciphertext c;
-//       c.load(*context_, stream);
-//       cs.push_back(c);
-//     }
-
-//     q.push_back(cs);
-//   }
-
-//   return q;
-// }
-
 int PIRServer::serialize_reply(PirReply &reply, stringstream &stream) {
   int output_size = 0;
   for (int i = 0; i < reply.size(); i++) {
@@ -321,8 +309,60 @@ int PIRServer::serialize_reply(PirReply &reply, stringstream &stream) {
   return output_size;
 }
 
-pair<Ciphertext, uint64_t>
-PIRServer::generate_reply(PirQuery &query, uint32_t client_id, uint8_t db_id) {
+pair<Ciphertext, uint64_t> PIRServer::generate_bf_reply(PirQuery &query,
+                                                        uint32_t client_id) {
+  Ciphertext reply = generate_reply(query, client_id, bf_id);
+
+  std::random_device rd;
+  std::mt19937_64 gen(rd());
+
+  Plaintext mask_plain(enc_params_.poly_modulus_degree());
+  mask_plain.set_zero();
+
+  uint64_t mask;
+  while (mask_plain[0] == 0) {
+    mask = gen() % enc_params_.plain_modulus().value();
+    printf("mask: %lu\n", mask);
+    mask_plain[0] = (enc_params_.plain_modulus().value() - mask) %
+                    enc_params_.plain_modulus().value();
+  }
+  // mask_plain[0] = mask;
+  Ciphertext mask_cipher;
+  encryptor_->encrypt(mask_plain, mask_cipher);
+
+  evaluator_->add(reply, mask_cipher, reply);
+  return make_pair(reply, mask);
+}
+
+pair<Ciphertext, uint64_t> PIRServer::generate_lff_reply(PirQuery &query,
+                                                         Ciphertext weight,
+                                                         uint32_t client_id) {
+  Ciphertext reply = generate_reply(query, client_id, lff_id);
+
+  std::random_device rd;
+  std::mt19937_64 gen(rd());
+
+  Plaintext mask_plain(enc_params_.poly_modulus_degree());
+  mask_plain.set_zero();
+
+  uint64_t mask;
+  while (mask_plain[0] == 0) {
+    mask = gen() % enc_params_.plain_modulus().value();
+    printf("mask: %lu\n", mask);
+    mask_plain[0] = (enc_params_.plain_modulus().value() - mask) %
+                    enc_params_.plain_modulus().value();
+  }
+  Ciphertext mask_cipher;
+  encryptor_->encrypt(mask_plain, mask_cipher);
+
+  evaluator_->multiply(reply, weight, reply);
+  evaluator_->add(reply, mask_cipher, reply);
+
+  return make_pair(reply, mask);
+}
+
+Ciphertext PIRServer::generate_reply(PirQuery &query, uint32_t client_id,
+                                     uint8_t db_id) {
   vector<uint64_t> nvec;
   vector<Plaintext> *cur;
   if (db_id == bf_id) {
@@ -384,14 +424,6 @@ PIRServer::generate_reply(PirQuery &query, uint32_t client_id, uint8_t db_id) {
       }
     }
 
-    // Transform plaintext to NTT. If database is pre-processed, can skip
-    // if ((!is_db_preprocessed_) || i > 0) {
-    //   for (uint32_t jj = 0; jj < cur->size(); jj++) {
-    //     evaluator_->transform_to_ntt_inplace((*cur)[jj],
-    //                                          context_->first_parms_id());
-    //   }
-    // }
-
     for (uint64_t k = 0; k < product; k++) {
       if ((*cur)[k].is_zero()) {
         cout << k + 1 << "/ " << product << "-th ptxt = 0 " << endl;
@@ -438,22 +470,7 @@ PIRServer::generate_reply(PirQuery &query, uint32_t client_id, uint8_t db_id) {
 
     if (i == nvec.size() - 1) {
       assert(intermediateCtxts.size() == 1);
-
-      seal::Blake2xbPRNGFactory factory;
-      auto gen = factory.create();
-      uint64_t mask = gen->generate() % enc_params_.plain_modulus().value();
-      printf("mask: %lu\n", mask);
-      // uint64_t mask = gen->generate() % enc_params_.plain_modulus().value();
-
-      Plaintext mask_plain(N);
-      mask_plain.set_zero();
-      mask_plain[0] = mask;
-      Ciphertext mask_cipher;
-      encryptor_->encrypt(mask_plain, mask_cipher);
-
-      evaluator_->add(intermediateCtxts[0], mask_cipher, mask_cipher);
-      // evaluator_->multiply(mask_cipher, intermediateCtxts[0], mask_cipher);
-      return make_pair(mask_cipher, mask);
+      return intermediateCtxts[0];
     } else {
       intermediate_cipher.clear();
       intermediate_cipher.reserve(product);
@@ -462,29 +479,6 @@ PIRServer::generate_reply(PirQuery &query, uint32_t client_id, uint8_t db_id) {
 
         intermediate_cipher.emplace_back(std::move(intermediateCtxts[rr]));
       }
-
-      // intermediate_plain.clear();
-      // intermediate_plain.reserve(pir_params_.expansion_ratio * product);
-      // cur = &intermediate_plain;
-
-      // for (uint64_t rr = 0; rr < product; rr++) {
-      //   EncryptionParameters parms;
-      //   if (pir_params_.enable_mswitching) {
-      //     evaluator_->mod_switch_to_inplace(intermediateCtxts[rr],
-      //                                       context_->last_parms_id());
-      //     parms = context_->last_context_data()->parms();
-      //   } else {
-      //     parms = context_->first_context_data()->parms();
-      //   }
-
-      //   vector<Plaintext> plains =
-      //       decompose_to_plaintexts(parms, intermediateCtxts[rr]);
-
-      //   for (uint32_t jj = 0; jj < plains.size(); jj++) {
-      //     intermediate_plain.emplace_back(plains[jj]);
-      //   }
-      // }
-      // product = intermediate_plain.size(); // multiply by expansion rate.
     }
     cout << "Server: " << i + 1 << "-th recursion level finished " << endl;
     cout << endl;
@@ -493,7 +487,7 @@ PIRServer::generate_reply(PirQuery &query, uint32_t client_id, uint8_t db_id) {
   // This should never get here
   assert(0);
   vector<Ciphertext> fail(1);
-  return make_pair(fail[0], 0UL);
+  return fail[0];
 }
 
 inline vector<Ciphertext> PIRServer::expand_query(const Ciphertext &encrypted,
@@ -535,33 +529,16 @@ inline vector<Ciphertext> PIRServer::expand_query(const Ciphertext &encrypted,
       evaluator_->apply_galois(temp[a], galois_elts[i], galkey,
                                tempctxt_rotated);
 
-      // cout << "rotate " <<
-      // client.decryptor_->invariant_noise_budget(tempctxt_rotated) << ", ";
-
       evaluator_->add(temp[a], tempctxt_rotated, newtemp[a]);
       multiply_power_of_X(temp[a], tempctxt_shifted, index_raw);
 
-      // cout << "mul by x^pow: " <<
-      // client.decryptor_->invariant_noise_budget(tempctxt_shifted) << ", ";
-
       multiply_power_of_X(tempctxt_rotated, tempctxt_rotatedshifted, index);
-
-      // cout << "mul by x^pow: " <<
-      // client.decryptor_->invariant_noise_budget(tempctxt_rotatedshifted) <<
-      // ", ";
 
       // Enc(2^i x^j) if j = 0 (mod 2**i).
       evaluator_->add(tempctxt_shifted, tempctxt_rotatedshifted,
                       newtemp[a + temp.size()]);
     }
     temp = newtemp;
-    /*
-    cout << "end: ";
-    for (int h = 0; h < temp.size();h++){
-        cout << client.decryptor_->invariant_noise_budget(temp[h]) << ", ";
-    }
-    cout << endl;
-    */
   }
   // Last step of the loop
   vector<Ciphertext> newtemp(temp.size() << 1);
@@ -571,7 +548,6 @@ inline vector<Ciphertext> PIRServer::expand_query(const Ciphertext &encrypted,
     if (a >= (m - (1 << (logm - 1)))) { // corner case.
       evaluator_->multiply_plain(temp[a], two,
                                  newtemp[a]); // plain multiplication by 2.
-      // cout << client.decryptor_->invariant_noise_budget(newtemp[a]) << ", ";
     } else {
       evaluator_->apply_galois(temp[a], galois_elts[logm - 1], galkey,
                                tempctxt_rotated);
@@ -598,9 +574,6 @@ inline void PIRServer::multiply_power_of_X(const Ciphertext &encrypted,
   auto coeff_count = enc_params_.poly_modulus_degree();
   auto encrypted_count = encrypted.size();
 
-  // cout << "coeff mod count for power of X = " << coeff_mod_count << endl;
-  // cout << "coeff count for power of X = " << coeff_count << endl;
-
   // First copy over.
   destination = encrypted;
 
@@ -615,24 +588,4 @@ inline void PIRServer::multiply_power_of_X(const Ciphertext &encrypted,
     }
   }
 }
-
-// void PIRServer::simple_set(uint64_t index, Plaintext pt) {
-//   if (is_db_preprocessed_) {
-//     evaluator_->transform_to_ntt_inplace(pt, context_->first_parms_id());
-//   }
-//   db_->operator[](index) = pt;
-// }
-
-// Ciphertext PIRServer::simple_query(uint64_t index) {
-//   // There is no transform_from_ntt that takes a plaintext
-//   Ciphertext ct;
-//   Plaintext pt = db_->operator[](index);
-//   evaluator_->multiply_plain(one_, pt, ct);
-//   evaluator_->transform_from_ntt_inplace(ct);
-//   return ct;
-// }
-
-void PIRServer::set_one_ct(Ciphertext one) {
-  one_ = one;
-  evaluator_->transform_to_ntt_inplace(one_);
-}
+} // namespace lpr21::sealpir

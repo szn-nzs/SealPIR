@@ -13,6 +13,7 @@ using namespace std;
 using namespace seal;
 using namespace seal::util;
 
+namespace lpr21::sealpir {
 std::vector<std::uint64_t> get_dimensions(std::uint64_t num_of_plaintexts,
                                           std::uint32_t d) {
 
@@ -95,7 +96,7 @@ void gen_pir_params(uint64_t ele_num, uint64_t ele_size, uint64_t key_size,
   pir_params.enable_batching = enable_batching;
   pir_params.enable_mswitching = enable_mswitching;
   pir_params.ele_num = ele_num;
-  pir_params.ele_size = ele_size;
+  // pir_params.ele_size = ele_size;
   // pir_params.key_size = key_size;
   pir_params.elements_per_plaintext = 1;
   // pir_params.elements_per_plaintext = elements_per_plaintext;
@@ -163,7 +164,7 @@ void print_pir_params(const PirParams &pir_params) {
 
   cout << "PIR Parameters" << endl;
   cout << "number of elements: " << pir_params.ele_num << endl;
-  cout << "element size: " << pir_params.ele_size << endl;
+  // cout << "element size: " << pir_params.ele_size << endl;
   cout << "elements per BFV plaintext: " << pir_params.elements_per_plaintext
        << endl;
   cout << "dimensions for d-dimensional hyperrectangle: " << pir_params.bf_d
@@ -445,3 +446,4 @@ GaloisKeys *deserialize_galoiskeys(string s, shared_ptr<SEALContext> context) {
   g->load(*context, input);
   return g;
 }
+} // namespace lpr21::sealpir

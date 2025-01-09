@@ -22,6 +22,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <iterator>
 #include <limits>
@@ -284,6 +285,7 @@ public:
     for (std::size_t i = 0; i < salt_.size(); ++i) {
       compute_indices(hash_ap(key_begin, length, salt_[i]), bit_index, bit);
 
+      // printf("i: %lu, hash: %lu\n", i, bit_index);
       bit_table_[bit_index / bits_per_char] |= bit_mask[bit];
     }
 

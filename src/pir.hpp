@@ -14,13 +14,14 @@ typedef std::vector<seal::Plaintext> Database;
 typedef std::vector<std::vector<seal::Ciphertext>> PirQuery;
 typedef std::vector<seal::Ciphertext> PirReply;
 
+namespace lpr21::sealpir {
 struct PirParams {
   bool enable_symmetric;
   bool enable_batching;
   bool enable_mswitching;
   std::uint64_t ele_num;
   // std::uint64_t key_size;
-  std::uint64_t ele_size;
+  // std::uint64_t ele_size;
   std::uint64_t elements_per_plaintext;
   std::uint32_t expansion_ratio; // ratio of ciphertext to plaintext
 
@@ -131,3 +132,4 @@ std::string serialize_galoiskeys(seal::Serializable<seal::GaloisKeys> g);
 seal::GaloisKeys *
 deserialize_galoiskeys(std::string s,
                        std::shared_ptr<seal::SEALContext> context);
+} // namespace lpr21::sealpir

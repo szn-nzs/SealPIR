@@ -1,8 +1,15 @@
 #pragma once
 
+#include "ot/myIKNP.hpp"
+#include "ot/myNOT.hpp"
+#include "ot/myROT.hpp"
 #include "pir.hpp"
 #include "pir_client.hpp"
+#include <algorithm>
 #include <cstdint>
+#include <cstdio>
+#include <emp-tool/utils/block.h>
+#include <emp-tool/utils/group.h>
 #include <map>
 #include <memory>
 #include <seal/ciphertext.h>
@@ -10,6 +17,7 @@
 #include <utility>
 #include <vector>
 
+namespace lpr21::sealpir {
 class PIRServer {
 public:
   const static std::uint8_t bf_id = 0;
@@ -19,9 +27,15 @@ public:
   using KVMapType = std::vector<std::pair<uint64_t, std::vector<uint64_t>>>;
   // using DBType =
   //     std::vector<std::pair<std::vector<uint8_t>, std::vector<uint8_t>>>;
+  ot::myROTSender sender_;
+  ot::myROTReceiver receiver_;
+  ot::myNOTSender not_sender_;
+
   PIRServer(const seal::EncryptionParameters &enc_params,
             const PirParams &pir_params, const seal::PublicKey &public_key,
-            const PIRClient &client);
+            const PIRClient &client,
+            std::shared_ptr<ot::myIKNPSender> iknp_sender,
+            std::shared_ptr<ot::myIKNPReceiver> iknp_receiver);
 
   // NOTE: server takes over ownership of db and frees it when it exits.
   // Caller cannot free db
@@ -38,21 +52,46 @@ public:
                                              std::uint32_t m,
                                              std::uint32_t client_id);
 
-  PirQuery deserialize_query(std::stringstream &stream);
+  seal::Ciphertext generate_reply(PirQuery &query, std::uint32_t client_id,
+                                  std::uint8_t db_id);
   std::pair<seal::Ciphertext, std::uint64_t>
-  generate_reply(PirQuery &query, std::uint32_t client_id, std::uint8_t db_id);
-  // Serializes the reply into the provided stream and returns the number of
-  // bytes written
+  generate_bf_reply(PirQuery &query, std::uint32_t client_id);
+  std::pair<seal::Ciphertext, std::uint64_t>
+  generate_lff_reply(PirQuery &query, seal::Ciphertext weight,
+                     std::uint32_t client_id);
+
   int serialize_reply(PirReply &reply, std::stringstream &stream);
 
   void set_galois_key(std::uint32_t client_id, seal::GaloisKeys galkey);
 
-  // Below simple operations are for interacting with the database WITHOUT PIR.
-  // So they can be used to modify a particular element in the database or
-  // to query a particular element (without privacy guarantees).
-  void simple_set(std::uint64_t index, seal::Plaintext pt);
-  seal::Ciphertext simple_query(std::uint64_t index);
-  void set_one_ct(seal::Ciphertext one);
+  // not
+  emp::block setS() { return not_sender_.setS(); }
+  void setupNOT() { not_sender_.setupNOT(); }
+  std::vector<std::vector<emp::block>> sendROT(const std::vector<uint8_t> &e) {
+    return not_sender_.sendROT(e);
+  }
+  std::pair<uint64_t, std::vector<emp::block>> sendNOT(uint64_t r_prime) {
+    std::random_device rd;
+    std::mt19937 gen(rd());
+    uint64_t bs = gen() & 1;
+
+    uint64_t k = pir_params_.bf_params.optimal_parameters.number_of_hashes;
+    uint64_t plain_modulus = enc_params_.plain_modulus().value();
+    uint64_t idx = (plain_modulus + k - r_prime) % plain_modulus;
+    idx = idx % (k + 1);
+    printf("bs: %lu, idx: %lu\n", bs, idx);
+
+    std::vector<emp::block> data(k + 1);
+    for (uint64_t i = 0; i < k + 1; ++i) {
+      data[i] = emp::makeBlock(0, bs);
+    }
+    data[idx] = emp::makeBlock(0, bs ^ 1);
+
+    auto res = not_sender_.sendNOT(gsl::span(data.data(), data.size()));
+    return std::make_pair(bs, res);
+  }
+
+  // value or default
 
 private:
   seal::EncryptionParameters enc_params_; // SEAL parameters
@@ -63,14 +102,11 @@ private:
   std::map<int, seal::GaloisKeys> galoisKeys_;
   std::unique_ptr<seal::Evaluator> evaluator_;
   std::unique_ptr<seal::Encryptor> encryptor_;
-  // std::unique_ptr<seal::BatchEncoder> encoder_;
   std::shared_ptr<seal::SEALContext> context_;
-
-  // This is only used for simple_query
-  seal::Ciphertext one_;
 
   const PIRClient &client_;
 
   void multiply_power_of_X(const seal::Ciphertext &encrypted,
                            seal::Ciphertext &destination, std::uint32_t index);
 };
+} // namespace lpr21::sealpir
