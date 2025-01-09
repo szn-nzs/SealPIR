@@ -17,9 +17,6 @@ class PIRClient {
 public:
   const static std::uint8_t bf_id = 0;
   const static std::uint8_t lff_id = 1;
-  lpr21::ot::myROTSender sender_;
-  lpr21::ot::myROTReceiver receiver_;
-  lpr21::ot::myNOTReceiver not_receiver_;
 
   PIRClient(const seal::EncryptionParameters &encparms,
             const PirParams &pir_params,
@@ -48,7 +45,6 @@ public:
 
   uint64_t decode_bf_reply(const seal::Ciphertext &replyt);
 
-  // std::vector<uint8_t> decode_lff_reply(const seal::Ciphertext &reply);
   uint64_t decode_lff_reply(const seal::Ciphertext &reply);
 
   seal::Plaintext decrypt(seal::Ciphertext ct) const;
@@ -60,20 +56,24 @@ public:
   uint64_t get_fv_offset(uint64_t element_index);
 
   // not
-  void setupNOT(uint64_t r) {
-    uint64_t k = pir_params_.bf_params.optimal_parameters.number_of_hashes;
-    not_receiver_.setupNOT(r % (k + 1));
-    printf("r: %lu\n", r % (k + 1));
-  }
-  void setS(emp::block s) { not_receiver_.setS(s); }
-  std::vector<uint8_t> recvROTPre() { return not_receiver_.recvROTPre(); }
-  std::vector<emp::block> recvROT(std::vector<std::vector<emp::block>> res) {
-    return not_receiver_.recvROT(res);
-  }
+  void setupNOT(uint64_t r);
+  void setNOTS(emp::block s);
+  std::vector<uint8_t> recvROTPre();
+  std::vector<emp::block> recvROT(std::vector<std::vector<emp::block>> res);
   std::vector<emp::block> recvNOT(std::vector<emp::block> key,
-                                  std::vector<emp::block> res) {
-    return not_receiver_.recvNOT(key, res);
-  }
+                                  std::vector<emp::block> res);
+
+  // value or default
+  // as sender
+  emp::block setS();
+  std::vector<std::vector<emp::block>> sendOT(uint64_t vc, uint64_t default_v,
+                                              const std::vector<uint8_t> &e);
+  // as receiver
+  void setS(emp::block s);
+  std::vector<uint8_t> recvOTPre();
+  std::vector<emp::block>
+  recvOT(const std::vector<std::vector<emp::block>> &res);
+  uint64_t getDelta();
 
 private:
   seal::EncryptionParameters enc_params_;
@@ -87,8 +87,14 @@ private:
   // std::unique_ptr<seal::BatchEncoder> encoder_;
   std::shared_ptr<seal::SEALContext> context_;
 
+  lpr21::ot::myROTSender sender_;
+  lpr21::ot::myROTReceiver receiver_;
+  lpr21::ot::myNOTReceiver not_receiver_;
+
   vector<uint64_t> seed_;
   uint64_t w_;
+  uint64_t bc_;
+  uint64_t Delta_;
 
   friend class PIRServer;
 };

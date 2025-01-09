@@ -588,4 +588,59 @@ inline void PIRServer::multiply_power_of_X(const Ciphertext &encrypted,
     }
   }
 }
+
+// not
+emp::block PIRServer::setNOTS() { return not_sender_.setS(); }
+void PIRServer::setupNOT() { not_sender_.setupNOT(); }
+std::vector<std::vector<emp::block>>
+PIRServer::sendROT(const std::vector<uint8_t> &e) {
+  return not_sender_.sendROT(e);
+}
+std::pair<uint64_t, std::vector<emp::block>>
+PIRServer::sendNOT(uint64_t r_prime) {
+  std::random_device rd;
+  std::mt19937 gen(rd());
+  bs_ = gen() & 1;
+
+  uint64_t k = pir_params_.bf_params.optimal_parameters.number_of_hashes;
+  uint64_t plain_modulus = enc_params_.plain_modulus().value();
+  uint64_t idx = (plain_modulus + k - r_prime) % plain_modulus;
+  idx = idx % (k + 1);
+
+  std::vector<emp::block> data(k + 1);
+  for (uint64_t i = 0; i < k + 1; ++i) {
+    data[i] = emp::makeBlock(0, bs_);
+  }
+  data[idx] = emp::makeBlock(0, bs_ ^ 1);
+
+  auto res = not_sender_.sendNOT(gsl::span(data.data(), data.size()));
+  return std::make_pair(bs_, res);
+}
+
+// value or default
+// sender
+emp::block PIRServer::setS() { return sender_.setS(); }
+std::vector<std::vector<emp::block>>
+PIRServer::sendOT(uint64_t q, uint64_t vs, uint64_t default_v,
+                  const std::vector<uint8_t> &e) {
+  emp::block *m0_s = new emp::block[1];
+  emp::block *m1_s = new emp::block[1];
+  m0_s[0] = emp::makeBlock(0, q + bs_ * vs + (1 - bs_) * default_v);
+  m1_s[0] = emp::makeBlock(0, q + (1 - bs_) * vs + bs_ * default_v);
+  return sender_.sendOT(gsl::span(m0_s, 1), gsl::span(m1_s, 1), e, 1);
+}
+// receiver
+void PIRServer::setS(emp::block s) { receiver_.setS(s); }
+std::vector<uint8_t> PIRServer::recvOTPre() {
+  bool *rr = new bool[1];
+  rr[0] = bs_;
+  return receiver_.recvOTPre(gsl::span(rr, 1), 1);
+}
+std::vector<emp::block>
+PIRServer::recvOT(const std::vector<std::vector<emp::block>> &res) {
+  bool *rr = new bool[1];
+  rr[0] = bs_;
+  return receiver_.recvOT(res, gsl::span(rr, 1), 1);
+}
+
 } // namespace lpr21::sealpir

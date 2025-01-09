@@ -339,4 +339,55 @@ GaloisKeys PIRClient::generate_galois_keys() {
   keygen_->create_galois_keys(galois_elts, gal_keys);
   return gal_keys;
 }
+
+// not
+void PIRClient::setupNOT(uint64_t r) {
+  uint64_t k = pir_params_.bf_params.optimal_parameters.number_of_hashes;
+  not_receiver_.setupNOT(r % (k + 1));
+}
+void PIRClient::setNOTS(emp::block s) { not_receiver_.setS(s); }
+std::vector<uint8_t> PIRClient::recvROTPre() {
+  return not_receiver_.recvROTPre();
+}
+std::vector<emp::block>
+PIRClient::recvROT(std::vector<std::vector<emp::block>> res) {
+  return not_receiver_.recvROT(res);
+}
+std::vector<emp::block> PIRClient::recvNOT(std::vector<emp::block> key,
+                                           std::vector<emp::block> res) {
+  std::vector<emp::block> data = not_receiver_.recvNOT(key, res);
+  bc_ = ((uint64_t *)&data[0])[0];
+  return data;
+}
+
+// value or default
+// sender
+emp::block PIRClient::setS() { return sender_.setS(); }
+std::vector<std::vector<emp::block>>
+PIRClient::sendOT(uint64_t vc, uint64_t default_v,
+                  const std::vector<uint8_t> &e) {
+  std::random_device rd;
+  std::mt19937 gen(rd());
+  Delta_ = gen() % enc_params_.plain_modulus().value();
+  emp::block *m0_c = new emp::block[1];
+  emp::block *m1_c = new emp::block[1];
+  m0_c[0] = emp::makeBlock(0, Delta_ + bc_ * vc);
+  m1_c[0] = emp::makeBlock(0, Delta_ + (1 - bc_) * vc);
+  return sender_.sendOT(gsl::span(m0_c, 1), gsl::span(m1_c, 1), e, 1);
+}
+// receiver
+void PIRClient::setS(emp::block s) { receiver_.setS(s); }
+std::vector<uint8_t> PIRClient::recvOTPre() {
+  bool *rr = new bool[1];
+  rr[0] = bc_;
+  return receiver_.recvOTPre(gsl::span(rr, 1), 1);
+}
+std::vector<emp::block>
+PIRClient::recvOT(const std::vector<std::vector<emp::block>> &res) {
+  bool *rr = new bool[1];
+  rr[0] = bc_;
+  return receiver_.recvOT(res, gsl::span(rr, 1), 1);
+}
+
+uint64_t PIRClient::getDelta() { return Delta_; }
 } // namespace lpr21::sealpir

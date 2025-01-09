@@ -33,7 +33,7 @@ int main(int argc, char *argv[]) {
   uint32_t N = 8192;
 
   // Recommended values: (logt, d) = (20, 2).
-  uint32_t logt = 8;
+  uint32_t logt = 20;
   uint32_t bf_d = 2;
   uint32_t lff_d = 2;
   double epsilon = 1;
@@ -140,9 +140,6 @@ int main(int argc, char *argv[]) {
       iknp_receiver_c->recvPre(gsl::span(r, length), length);
   iknp_sender_s->sendPre(U2, length);
 
-  server.receiver_.setS(client.sender_.setS());
-  client.receiver_.setS(server.sender_.setS());
-
   // uint64_t ele_index = gen() % number_of_items;
   for (uint64_t ele_index = 0; ele_index < number_of_items; ++ele_index) {
     // ****************************************Measure query generation
@@ -202,10 +199,9 @@ int main(int argc, char *argv[]) {
     uint64_t r_client = bf_elems;
     uint64_t r_server = bf_reply.second;
 
-    printf("r: %lu, r_prime: %lu\n", r_client, r_server);
     server.setupNOT();
     client.setupNOT(r_client);
-    client.setS(server.setS());
+    client.setNOTS(server.setNOTS());
     std::vector<uint8_t> ee = client.recvROTPre();
     vector<vector<emp::block>> pad0 = server.sendROT(ee);
     vector<emp::block> key = client.recvROT(pad0);
@@ -223,41 +219,57 @@ int main(int argc, char *argv[]) {
 
     // ****************************************Value or Default
     length = 1;
-    uint64_t vs = lff_reply.second;
+    uint64_t sj = 0;
+    // uint64_t sj = gen() % plain_modulus;
+    uint64_t default_v = plain_modulus - sj;
+    uint64_t vs = (lff_reply.second + plain_modulus - sj) % plain_modulus;
     uint64_t vc = lff_elems;
-    uint64_t sj = gen() % plain_modulus;
-    uint64_t default_v = 0;
-    uint64_t Delta = gen() % plain_modulus;
 
-    emp::block *m0_c = new emp::block[1];
-    emp::block *m1_c = new emp::block[1];
-    m0_c[0] = emp::makeBlock(0, Delta + bc * vc);
-    m1_c[0] = emp::makeBlock(0, Delta + (1 - bc) * vc);
-    bool *rr = new bool[1];
-    rr[0] = bs;
+    // uint64_t Delta = gen() % plain_modulus;
 
-    vector<uint8_t> e = server.receiver_.recvOTPre(gsl::span(rr, 1), 1);
-    vector<vector<emp::block>> pad =
-        client.sender_.sendOT(gsl::span(m0_c, 1), gsl::span(m1_c, 1), e, 1);
-    vector<emp::block> data = server.receiver_.recvOT(pad, gsl::span(rr, 1), 1);
+    // emp::block *m0_c = new emp::block[1];
+    // emp::block *m1_c = new emp::block[1];
+    // m0_c[0] = emp::makeBlock(0, Delta + bc * vc);
+    // m1_c[0] = emp::makeBlock(0, Delta + (1 - bc) * vc);
+    // bool *rr = new bool[1];
+    // rr[0] = bs;
+
+    // server.receiver_.setS(client.sender_.setS());
+    // client.receiver_.setS(server.sender_.setS());
+    // vector<uint8_t> e = server.receiver_.recvOTPre(gsl::span(rr, 1), 1);
+    // vector<vector<emp::block>> pad =
+    //     client.sender_.sendOT(gsl::span(m0_c, 1), gsl::span(m1_c, 1), e, 1);
+    // vector<emp::block> data = server.receiver_.recvOT(pad, gsl::span(rr, 1),
+    // 1); assert(data.size() == 1);
+
+    server.setS(client.setS());
+    vector<uint8_t> e = server.recvOTPre();
+    vector<vector<emp::block>> pad = client.sendOT(vc, default_v, e);
+    vector<emp::block> data = server.recvOT(pad);
     assert(data.size() == 1);
 
     uint64_t q = ((uint64_t *)&data[0])[0];
     uint8_t b = bs ^ bc;
-    if (q % plain_modulus != (Delta + b * vc) % plain_modulus) {
+    if (q % plain_modulus != (client.getDelta() + b * vc) % plain_modulus) {
       printf("111ot error\n");
       is_error = true;
     }
 
-    emp::block *m0_s = new emp::block[1];
-    emp::block *m1_s = new emp::block[1];
-    m0_s[0] = emp::makeBlock(0, q + bs * vs + (1 - bs) * default_v);
-    m1_s[0] = emp::makeBlock(0, q + (1 - bs) * vs + bs * default_v);
-    rr[0] = bc;
+    // emp::block *m0_s = new emp::block[1];
+    // emp::block *m1_s = new emp::block[1];
+    // m0_s[0] = emp::makeBlock(0, q + bs * vs + (1 - bs) * default_v);
+    // m1_s[0] = emp::makeBlock(0, q + (1 - bs) * vs + bs * default_v);
+    // rr[0] = bc;
 
-    e = client.receiver_.recvOTPre(gsl::span(rr, 1), 1);
-    pad = server.sender_.sendOT(gsl::span(m0_s, 1), gsl::span(m1_s, 1), e, 1);
-    data = client.receiver_.recvOT(pad, gsl::span(rr, 1), 1);
+    // e = client.receiver_.recvOTPre(gsl::span(rr, 1), 1);
+    // pad = server.sender_.sendOT(gsl::span(m0_s, 1), gsl::span(m1_s, 1), e,
+    // 1); data = client.receiver_.recvOT(pad, gsl::span(rr, 1), 1);
+    // assert(data.size() == 1);
+
+    client.setS(server.setS());
+    e = client.recvOTPre();
+    pad = server.sendOT(q, vs, default_v, e);
+    data = client.recvOT(pad);
     assert(data.size() == 1);
 
     uint64_t q1 = ((uint64_t *)&data[0])[0];
@@ -266,8 +278,8 @@ int main(int argc, char *argv[]) {
       is_error = true;
     }
 
-    uint64_t output = q1 - Delta;
-    printf("vs: %lu, vc: %lu, Delta: %lu\n", vs, vc, Delta);
+    uint64_t output = q1 - client.getDelta();
+    printf("vs: %lu, vc: %lu, Delta: %lu\n", vs, vc, client.getDelta());
     printf("output: %lu, db idx: %lu, weight: %lu\n", output,
            db[ele_index].second, client.get_weight());
 
@@ -287,24 +299,18 @@ int main(int argc, char *argv[]) {
     if (is_error) {
       return -1;
     }
+    cout << "Main: PIR result correct!" << endl;
+    cout << "Main: PIRServer pre-processing time: " << time_pre_us / 1000
+         << "ms" << endl;
+    cout << "Main: PIRClient query generation time: " << time_query_us / 1000
+         << " ms" << endl;
+    cout << "Main: PIRServer reply generation time: " << time_server_us / 1000
+         << " ms" << endl;
+    cout << "Main: PIRClient answer decode time: " << time_decode_us / 1000
+         << " ms" << endl;
   }
 
   // Output results
-  cout << "Main: PIR result correct!" << endl;
-  // cout << "Main: PIRServer pre-processing time: " << time_pre_us / 1000 << "
-  // ms"
-  //      << endl;
-  // cout << "Main: PIRClient query generation time: " << time_query_us / 1000
-  //      << " ms" << endl;
-  //   cout << "Main: PIRClient serialized query generation time: "
-  //        << time_s_query_us / 1000 << " ms" << endl;
-  //   cout << "Main: PIRServer query deserialization time: " <<
-  //   time_deserial_us
-  //        << " us" << endl;
-  // cout << "Main: PIRServer reply generation time: " << time_server_us / 1000
-  //      << " ms" << endl;
-  // cout << "Main: PIRClient answer decode time: " << time_decode_us / 1000
-  //      << " ms" << endl;
   //   cout << "Main: Query size: " << query_size << " bytes" << endl;
   //   cout << "Main: Reply num ciphertexts: " << reply.size() << endl;
   //   cout << "Main: Reply size: " << reply_size << " bytes" << endl;
