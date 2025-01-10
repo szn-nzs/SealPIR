@@ -75,20 +75,19 @@ int main(int argc, char *argv[]) {
 
   // ****************************************Initialize PIR client....
   PIRClient client(enc_params, pir_params, iknp_sender_c, iknp_receiver_c);
-  cout << "Main: Generating galois keys for client" << endl;
+  printf("Main: Generating galois keys for client\n");
 
   GaloisKeys galois_keys = client.generate_galois_keys();
 
   // ****************************************Initialize PIR Server
-  cout << "Main: Initializing server" << endl;
+  printf("Main: Initializing server\n");
   PIRServer server(enc_params, pir_params, client.get_public_key(), client,
                    iknp_sender_s, iknp_receiver_s);
 
   server.set_galois_key(0, galois_keys);
 
-  cout << "Main: Creating the database with random data (this may take some "
-          "time) ..."
-       << endl;
+  printf("Main: Creating the database with random data (this may take some "
+         "time) ...\n");
 
   // ****************************************Create test database
   vector<pair<uint64_t, uint64_t>> db;
@@ -109,9 +108,9 @@ int main(int argc, char *argv[]) {
   server.preprocess_database();
   client.set_seed(seed);
   auto time_pre_e = high_resolution_clock::now();
-  auto time_pre_us =
-      duration_cast<microseconds>(time_pre_e - time_pre_s).count();
-  cout << "Main: database pre processed " << endl;
+  auto time_pre_ms =
+      duration_cast<milliseconds>(time_pre_e - time_pre_s).count();
+  printf("Main: database pre processed\n");
 
   // ****************************************generate OT instances
   emp::PRG prg(emp::fix_key);
@@ -147,9 +146,9 @@ int main(int argc, char *argv[]) {
     PirQuery bf_query = client.generate_bf_query(db[ele_index].first);
     auto lff_query = client.generate_lff_query_and_weight(db[ele_index].first);
     auto time_query_e = high_resolution_clock::now();
-    auto time_query_us =
-        duration_cast<microseconds>(time_query_e - time_query_s).count();
-    cout << "Main: query generated" << endl;
+    auto time_query_ms =
+        duration_cast<milliseconds>(time_query_e - time_query_s).count();
+    printf("Main: query generated\n");
 
     // ****************************************Measure query processing
     // (including expansion)
@@ -158,18 +157,18 @@ int main(int argc, char *argv[]) {
     pair<Ciphertext, uint64_t> lff_reply =
         server.generate_lff_reply(lff_query.second, lff_query.first, 0);
     auto time_server_e = high_resolution_clock::now();
-    auto time_server_us =
-        duration_cast<microseconds>(time_server_e - time_server_s).count();
-    cout << "Main: reply generated" << endl;
+    auto time_server_ms =
+        duration_cast<milliseconds>(time_server_e - time_server_s).count();
+    printf("Main: reply generated\n");
 
     // ****************************************Measure response extraction
     auto time_decode_s = chrono::high_resolution_clock::now();
     uint64_t bf_elems = client.decode_bf_reply(bf_reply.first);
     uint64_t lff_elems = client.decode_lff_reply(lff_reply.first);
     auto time_decode_e = chrono::high_resolution_clock::now();
-    auto time_decode_us =
-        duration_cast<microseconds>(time_decode_e - time_decode_s).count();
-    cout << "Main: reply decoded" << endl;
+    auto time_decode_ms =
+        duration_cast<milliseconds>(time_decode_e - time_decode_s).count();
+    printf("Main: reply decoded\n");
 
     bool failed = false;
     // ****************************************Check that we retrieved the
@@ -225,23 +224,6 @@ int main(int argc, char *argv[]) {
     uint64_t vs = (lff_reply.second + plain_modulus - sj) % plain_modulus;
     uint64_t vc = lff_elems;
 
-    // uint64_t Delta = gen() % plain_modulus;
-
-    // emp::block *m0_c = new emp::block[1];
-    // emp::block *m1_c = new emp::block[1];
-    // m0_c[0] = emp::makeBlock(0, Delta + bc * vc);
-    // m1_c[0] = emp::makeBlock(0, Delta + (1 - bc) * vc);
-    // bool *rr = new bool[1];
-    // rr[0] = bs;
-
-    // server.receiver_.setS(client.sender_.setS());
-    // client.receiver_.setS(server.sender_.setS());
-    // vector<uint8_t> e = server.receiver_.recvOTPre(gsl::span(rr, 1), 1);
-    // vector<vector<emp::block>> pad =
-    //     client.sender_.sendOT(gsl::span(m0_c, 1), gsl::span(m1_c, 1), e, 1);
-    // vector<emp::block> data = server.receiver_.recvOT(pad, gsl::span(rr, 1),
-    // 1); assert(data.size() == 1);
-
     server.setS(client.setS());
     vector<uint8_t> e = server.recvOTPre();
     vector<vector<emp::block>> pad = client.sendOT(vc, default_v, e);
@@ -254,17 +236,6 @@ int main(int argc, char *argv[]) {
       printf("111ot error\n");
       is_error = true;
     }
-
-    // emp::block *m0_s = new emp::block[1];
-    // emp::block *m1_s = new emp::block[1];
-    // m0_s[0] = emp::makeBlock(0, q + bs * vs + (1 - bs) * default_v);
-    // m1_s[0] = emp::makeBlock(0, q + (1 - bs) * vs + bs * default_v);
-    // rr[0] = bc;
-
-    // e = client.receiver_.recvOTPre(gsl::span(rr, 1), 1);
-    // pad = server.sender_.sendOT(gsl::span(m0_s, 1), gsl::span(m1_s, 1), e,
-    // 1); data = client.receiver_.recvOT(pad, gsl::span(rr, 1), 1);
-    // assert(data.size() == 1);
 
     client.setS(server.setS());
     e = client.recvOTPre();
@@ -299,15 +270,12 @@ int main(int argc, char *argv[]) {
     if (is_error) {
       return -1;
     }
-    cout << "Main: PIR result correct!" << endl;
-    cout << "Main: PIRServer pre-processing time: " << time_pre_us / 1000
-         << "ms" << endl;
-    cout << "Main: PIRClient query generation time: " << time_query_us / 1000
-         << " ms" << endl;
-    cout << "Main: PIRServer reply generation time: " << time_server_us / 1000
-         << " ms" << endl;
-    cout << "Main: PIRClient answer decode time: " << time_decode_us / 1000
-         << " ms" << endl;
+
+    printf("Main: PIR result correct!\n");
+    printf("Main: PIRServer pre-processing time: %lums\n", time_pre_ms);
+    printf("Main: PIRClient query generation time: %lums\n", time_query_ms);
+    printf("Main: PIRServer reply generation time: %lums\n", time_server_ms);
+    printf("Main: PIRClient answer decode time: %lums\n", time_decode_ms);
   }
 
   // Output results
